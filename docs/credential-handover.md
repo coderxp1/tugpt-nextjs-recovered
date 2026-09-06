@@ -101,11 +101,34 @@ The `fingerprint` is the first 12 hex characters of the SHA-256 of the value.
 Keep it: months later it is how you confirm the stored key is the one you meant
 without printing the key.
 
-Then restart the workers so a running process picks it up on its next job:
+**A restart is not what makes a stored credential visible, and this section
+used to imply it was.** Both credentials are resolved *per claim*: the factory
+`buildTranscriptionDeps` returns a closure that calls `readPlatformSecret`, and
+`TranscriptionWorker.processJob` invokes it once per job. `transcription-worker.ts:84-88`
+records that this is deliberate — "A cached client would keep a rotated key
+alive until the next restart, and rotation that requires a restart is rotation
+nobody performs during an incident." The only runtime consumer
+of `gladia/api_key` is that factory, so a worker that has been running since
+before the row existed picks it up on its next claim with no help at all.
+
+Restart when the **environment** changed, because that is read at process start:
+a new `TUGPT_SECRET_KEY_*` entry in the key ring, or a changed
+`TRANSCRIPTION_MAX_MEDIA_BYTES`.
 
 ```bash
+# Environment changes only. Note the blast radius: tugpt.service brings up the
+# whole stack, web included.
 sudo systemctl restart tugpt.service
+
+# The worker-scoped alternative, when you do need one:
+sudo docker compose -p tugpt restart transcription-worker
 ```
+
+A restart is not *harmful* while `voice_transcription` is off everywhere — there
+is nothing in flight to interrupt. It is harmful to plan around once the flag is
+on: an in-flight attempt is billed work, and `stop_grace_period: 330s` on that
+service exists to bound exactly that window, not to make restarting mid-attempt
+free.
 
 ### The credentials the transcription path needs
 
