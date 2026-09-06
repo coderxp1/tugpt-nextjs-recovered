@@ -125,7 +125,19 @@ export function parseArgs(argv: readonly string[]): PutArgs {
   for (let i = 1; i < argv.length; i += 1) {
     const flag = argv[i];
     if (!flag.startsWith('--')) {
-      throw new SecretsCliError(`unexpected argument "${flag}"\n\n${USAGE}`, 'USAGE');
+      // The offending token is NOT quoted back. This is the branch a pasted
+      // credential actually lands on — `put --provider ... <the key>`, which
+      // the test below feeds a real secret through — and the entry point writes
+      // err.message straight to stderr, which in a journald-captured session is
+      // a log. The SECRET_IN_ARGV path already refuses to echo its value for
+      // exactly that reason; a positional rejection that echoes one would put
+      // the key in the log the whole CLI is written to keep it out of.
+      // The position identifies the argument well enough to act on.
+      throw new SecretsCliError(
+        `unexpected argument at position ${i} — only --provider, --secret-name ` +
+          `and --key-id take values, and a secret is typed at the prompt, never passed here\n\n${USAGE}`,
+        'USAGE'
+      );
     }
 
     // Matched on the flag NAME, before any value is read, and the value is

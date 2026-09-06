@@ -123,9 +123,29 @@ describe('parseArgs', () => {
   });
 
   it('rejects a bare positional, which is how a pasted secret would arrive', () => {
-    expect(() =>
-      parseArgs(['put', '--provider', 'gladia', '--secret-name', 'api_key', SECRET])
-    ).toThrow(/unexpected argument/);
+    try {
+      parseArgs(['put', '--provider', 'gladia', '--secret-name', 'api_key', SECRET]);
+      expect.unreachable('expected the positional to be rejected');
+    } catch (e) {
+      const message = (e as Error).message;
+      // Rejecting it is only half of it. This message goes to stderr via the
+      // entry point's `err.message`, so quoting the token would move the secret
+      // from the shell history into the log — the same leak one step on.
+      expect(message).toMatch(/unexpected argument/);
+      expect(message).not.toContain(SECRET);
+      // 5 because 'put' is argv[0] — the position is what an operator counts.
+      expect(message).toContain('position 5');
+    }
+  });
+
+  it('rejects a value assigned inline to a forbidden flag, without echoing it', () => {
+    try {
+      parseArgs(['put', '--provider', 'gladia', `--secret=${SECRET}`]);
+      expect.unreachable('expected SECRET_IN_ARGV');
+    } catch (e) {
+      expect((e as Error).message).not.toContain(SECRET);
+      expect((e as Error).message).toContain('--secret');
+    }
   });
 
   it('rejects an unknown subcommand', () => {

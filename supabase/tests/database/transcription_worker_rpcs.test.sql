@@ -39,7 +39,7 @@
 -- an absence nobody tests is an absence that returns.
 
 BEGIN;
-SELECT plan(81);
+SELECT plan(83);
 
 -- --- Fixtures --------------------------------------------------------------
 
@@ -386,6 +386,34 @@ SELECT throws_ok(
 );
 
 UPDATE public.transcription_jobs SET attempts = 1 WHERE id = (SELECT id FROM _b_job);
+
+-- --- The claim's temp table, after a claim that raised -----------------------
+--
+-- read_transcription_jobs materializes its batch in a temp table so it can
+-- SUBTRACT rows from it (R16, R23, R24: a completed job's message is deleted,
+-- an exhausted one archived, and neither is returned as work). That pattern has
+-- one failure mode worth pinning here
+-- rather than trusting: R20 and R21 both raised *after* the CREATE TEMP TABLE,
+-- and pgTAP catches through a savepoint. If the rolled-back CREATE had left
+-- the relation behind, the next claim in this transaction — and the next claim
+-- in any two reads batched into one PostgREST call — would die with "relation
+-- already exists" instead of claiming work.
+--
+-- This is a real re-entry, not a formality: the message R21 failed on is still
+-- visible (the raise rolled back its visibility-timeout push), so the claim
+-- below takes it and runs the whole loop, including the DROP.
+SELECT lives_ok(
+  $$SELECT count(*) FROM public.read_transcription_jobs(120, 1)$$,
+  'R21b: a claim after two raised claims still runs (no leaked temp relation)'
+);
+
+SELECT is(
+  (SELECT count(*)::int FROM pg_catalog.pg_class
+   WHERE relnamespace = pg_catalog.pg_my_temp_schema()
+     AND relname = '_transcription_claimed'),
+  0,
+  'R21c: and the relation is genuinely gone, not shadowed by a later create'
+);
 
 -- --- A finished job is not work ---------------------------------------------
 --

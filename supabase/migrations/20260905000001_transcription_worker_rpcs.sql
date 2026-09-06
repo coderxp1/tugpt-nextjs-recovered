@@ -357,6 +357,34 @@ BEGIN
     RAISE EXCEPTION 'INVALID_VISIBILITY_TIMEOUT' USING ERRCODE = '90007';
   END IF;
 
+  -- WHY A TEMP TABLE. It is not decoration copied from _draft_claimed; it is
+  -- what makes this function expressible at all. pgmq.read() has already
+  -- committed the lease by the time its rows are in hand, and steps 2 and 4
+  -- below have to SUBTRACT from that batch -- a completed job's message is deleted
+  -- from the queue, a dead-lettered one is archived -- because a message whose
+  -- job has finished is not work and must never reach a worker. A set-returning
+  -- function called in a FOR loop cannot be subtracted from, so the batch is
+  -- materialized once, edited, and read back by the RETURN QUERY below.
+  --
+  -- Three failure modes come with the pattern. Each was checked against
+  -- PostgreSQL rather than assumed:
+  --
+  --   * ON COMMIT DROP and an exception. Creating a temp table is transactional
+  --     DDL, so the rollback an escaped RAISE causes un-makes the table. That
+  --     covers pgTAP too, whose throws_ok catches through a savepoint: a
+  --     raised P3I03/P3I04 cannot leave the name behind for the next claim.
+  --   * Re-entry in one transaction. The success path drops the table itself,
+  --     so a second claim in the same transaction -- two reads batched into one
+  --     PostgREST call, or two assertions in one pgTAP transaction -- does not
+  --     die on "relation already exists". Pinned by R21b/R21c.
+  --   * Deleting from a table an open cursor is scanning. Only the current row
+  --     is deleted, which the cursor has already returned, and the loop inserts
+  --     nothing, so no row is skipped or visited twice.
+  --
+  -- The explicit DROP at the bottom covers the one path a rollback does not: a
+  -- claim that succeeded, in a transaction that is then reused for another
+  -- claim. ON COMMIT DROP is the backstop for every path the DROP line is never
+  -- reached on.
   CREATE TEMP TABLE _transcription_claimed ON COMMIT DROP AS
   SELECT r.msg_id, r.read_ct, r.message AS payload, r.enqueued_at, r.vt
   FROM pgmq.read('transcription', p_visibility_timeout_seconds, v_limit) AS r;
