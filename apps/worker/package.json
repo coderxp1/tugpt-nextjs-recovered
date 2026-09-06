@@ -6,9 +6,12 @@
     "build": "tsc",
     "dev": "tsx src/index.ts",
     "dev:draft": "tsx src/draft-index.ts",
+    "dev:transcription": "tsx src/transcription-index.ts",
     "e2e:milestone1": "tsx src/e2e/milestone1.ts",
+    "secrets": "node dist/secrets-cli.js",
     "start": "node dist/index.js",
     "start:draft": "node dist/draft-index.js",
+    "start:transcription": "node dist/transcription-index.js",
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
@@ -19,7 +22,8 @@
     "@tugpt/ai-providers": "workspace:*",
     "@tugpt/database": "workspace:*",
     "@tugpt/jobs": "workspace:*",
-    "@tugpt/observability": "workspace:*"
+    "@tugpt/observability": "workspace:*",
+    "@tugpt/security": "workspace:*"
   },
   "devDependencies": {
     "@types/node": "^20",

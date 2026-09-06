@@ -231,6 +231,68 @@ pass the `failed_jobs` CHECK constraint, but no code path produces them. They ar
 legacy allowlist entries. Seeing one means something other than this worker wrote
 the row.
 
+### Voice transcription outcomes
+
+A separate switch and a separate worker, so a separate table. Nothing below can
+occur until `voice_transcription` is true for an organization — and because the
+enqueue reads *both* flags, a voice note arriving while `ai_draft_generation` is
+off is never transcribed at all.
+
+The thing to hold in mind reading this table is that **Gladia bills on
+submission**. A dead letter here may name work that was already paid for; the
+`TRANSCRIPTION_TIMEOUT` row is exactly that case, and it is why that code exists
+separately from `TRANSCRIPTION_EXHAUSTED_RETRIES`.
+
+<!-- transcription-outcome-table:start -->
+
+| What you see | What it means | Do |
+|---|---|---|
+| `completed`, no error | working. An **empty** transcript is also success: a silent recording transcribes to nothing, is billed anyway, and enqueues no draft | continue |
+| `skipped` / `FEATURE_DISABLED` | `voice_transcription` went false between enqueue and processing | nothing was spent; re-check §3 if unintended |
+| `skipped` / `DRAFT_DISABLED` | `ai_draft_generation` went false. Transcribing now would pay for a transcript no reviewer will act on | nothing was spent |
+| `dead_lettered` / `TRANSCRIPTION_PROVIDER_CONFIG_ERROR` | no `gladia/api_key` row in `platform_secrets`, or the key ring cannot open it — no provider could be constructed | `docs/credential-handover.md` §2; the key is **absent**, not wrong |
+| `dead_lettered` / `TRANSCRIPTION_PROVIDER_AUTH_ERROR` | Gladia **rejected** the key (401/403). Distinct from the row above: present and wrong, not absent | rotate it per `docs/credential-handover.md` §3 |
+| `dead_lettered` / `TRANSCRIPTION_MEDIA_AUTH_ERROR` | no `meta/graph_access_token` row, or Meta rejected it. A **different credential** from the two above | fix the Graph token, not the Gladia key |
+| `dead_lettered` / `TRANSCRIPTION_MEDIA_TOO_LARGE` | over `TRANSCRIPTION_MAX_MEDIA_BYTES` (8 MiB default). Terminal on the first attempt — a recording does not shrink | nothing was spent; raise the ceiling only deliberately, it is a cost control |
+| `dead_lettered` / `TRANSCRIPTION_MEDIA_UNAVAILABLE` | Meta will not serve that media id — expired, deleted, or never ours; or the metadata response had an unusable shape | nothing was spent. Meta expires media; an old queued job is the ordinary cause |
+| `dead_lettered` / `TRANSCRIPTION_TIMEOUT` | we stopped waiting after 300s. **The job is still running at Gladia and is still billed** | `transcription_jobs.provider_job_reference` is the handle; the result can still be collected by hand |
+| `dead_lettered` / `TRANSCRIPTION_EXHAUSTED_RETRIES` | three genuinely transient failures — Meta 5xx, truncated downloads, or Gladia unavailable | check both vendors before suspecting the worker |
+| `dead_lettered` / `TRANSCRIPTION_MALFORMED_RESPONSE` | Gladia answered in a shape the adapter would not accept. Most often a finished job reporting no usable `billing_time` — the adapter refuses to substitute `audio_duration`, because that understates every stereo file by 100% | `provider_error_detail`; if it repeats, the API changed under us |
+| `dead_lettered` / `TRANSCRIPTION_PROVIDER_ERROR` | Gladia rejected the request or failed the job for a reason that is not auth, config, or shape | `provider_error_detail`; it quotes the provider |
+| `dead_lettered` / `TRANSCRIPTION_INTERNAL_ERROR` | unclassified failure inside the worker | `docker compose -p tugpt logs transcription-worker`; a bug until proven otherwise |
+| A voice note transcribed **twice** | a resume path failed | **stop the worker.** This is the one failure that costs money per occurrence; check `provider_job_reference` was being written |
+
+<!-- transcription-outcome-table:end -->
+
+**Transcription dead letters:**
+
+```sql
+SELECT created_at, error_code, attempts, provider_error_detail
+FROM public.failed_jobs
+WHERE queue_name = 'transcription'
+  AND created_at > now() - interval '24 hours'
+ORDER BY created_at DESC;
+```
+
+**What each voice note cost** — `audio_seconds` is Gladia's own billed quantity
+(duration times channels), not the wall-clock length, so a stereo recording
+correctly shows roughly twice its duration:
+
+```sql
+SELECT e.occurred_at, e.provider, c.quantity AS audio_seconds, c.cost_micros
+FROM public.provider_usage_events e
+JOIN public.provider_usage_components c ON c.event_id = e.id
+WHERE e.organization_id = '<ORG_UUID>'
+  AND e.modality = 'audio'
+ORDER BY e.occurred_at DESC;
+```
+
+A `NULL` `cost_micros` means no price is seeded for that provider and dimension.
+The row is deliberately still recorded: the call happened and Gladia will charge
+for it, so losing the row would destroy the only evidence, and pricing it at zero
+would under-report the organization's consumption. Unpriced rows are countable,
+which is the difference between a known gap and a wrong number.
+
 **Dead letters, with the provider's own words:**
 
 ```sql

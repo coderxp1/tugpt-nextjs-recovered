@@ -11,6 +11,7 @@
     "lint": "eslint ."
   },
   "dependencies": {
+    "@supabase/supabase-js": "^2.112.3",
     "@tugpt/auth": "workspace:*",
     "@tugpt/database": "workspace:*"
   },

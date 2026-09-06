@@ -105,7 +105,7 @@ function packagesMissingABuild(): string[] {
   return missing;
 }
 
-const SERVICES = ['whatsapp-worker', 'draft-worker'] as const;
+const SERVICES = ['whatsapp-worker', 'draft-worker', 'transcription-worker'] as const;
 
 describe('worker container start command', () => {
   it('finds the files it is guarding (a moved file must fail loudly, not silently pass)', () => {

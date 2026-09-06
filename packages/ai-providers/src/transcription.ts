@@ -24,10 +24,15 @@
  * Where the audio lives.
  *
  * A URL rather than bytes: the async transcription APIs fetch the media
- * themselves, and streaming a WhatsApp voice note through the worker's memory
- * to re-upload it would add a copy, a size limit, and a failure mode for no
- * gain. The URL must be reachable by the provider, which is a deployment
- * property worth stating out loud rather than discovering from a 4xx.
+ * themselves, so for a URL the provider can reach, this avoids a copy through
+ * the worker's memory. **The URL must be reachable by the provider** — stated
+ * out loud here rather than discovered from a 4xx.
+ *
+ * WhatsApp media is NOT such a URL. Meta's Graph media endpoint is
+ * Authorization-gated, so no third party can fetch it. That case goes through
+ * {@link TranscriptionUploader} instead, and the sentence above is why: this
+ * interface was written assuming a fetchable URL, and WhatsApp is the first
+ * source that is not one.
  */
 export interface AudioSource {
   readonly url: string;
@@ -149,4 +154,56 @@ export interface TranscriptionProvider {
     audio: AudioSource,
     options?: TranscriptionOptions & { readonly onSubmitted?: (id: string) => void | Promise<void> }
   ): Promise<TranscriptionResult>;
+}
+
+/**
+ * Audio held in memory, for providers that accept an upload.
+ *
+ * `AudioSource` above says the provider fetches the URL itself, and for a URL
+ * the provider can reach that is still the right shape. WhatsApp media is not
+ * such a URL: Meta's Graph media endpoint requires an `Authorization` header
+ * carrying our access token, so a third party given the URL receives a 401.
+ * Handing Gladia that URL would be both broken and — if it ever worked —
+ * a credential shared with a vendor that has no business holding one.
+ *
+ * So for WhatsApp the bytes transit the worker. That is a deliberate cost:
+ * memory proportional to the file, which is why the download side enforces a
+ * hard ceiling before and during the transfer rather than trusting a
+ * Content-Length header.
+ */
+export interface AudioUpload {
+  readonly bytes: Uint8Array;
+  /** Used only for the multipart part name; providers infer format from bytes. */
+  readonly filename: string;
+  readonly contentType: string;
+}
+
+/**
+ * A provider that can be handed bytes instead of a URL.
+ *
+ * Separate from {@link TranscriptionProvider} for the same reason
+ * transcription is separate from completion: not every provider offers it, and
+ * a method that throws 'unsupported' on half its implementations is a contract
+ * that lies. `supportsAudioUpload` is the narrowing a caller uses.
+ */
+export interface TranscriptionUploader {
+  /**
+   * Upload audio and return the source to hand to `submit`/`transcribe`.
+   *
+   * Returns an {@link AudioSource} rather than a bare string so the two halves
+   * compose without the caller reconstructing anything, and so a provider that
+   * needs to carry a content type through can.
+   *
+   * NOT BILLED. An upload is storage, not transcription: nothing is charged
+   * until the job is submitted. That asymmetry is why upload failures may be
+   * retried freely and submission failures may not.
+   */
+  uploadAudio(audio: AudioUpload, options?: TranscriptionOptions): Promise<AudioSource>;
+}
+
+/** Narrows a provider to one that accepts uploads. */
+export function supportsAudioUpload(
+  provider: TranscriptionProvider
+): provider is TranscriptionProvider & TranscriptionUploader {
+  return typeof (provider as Partial<TranscriptionUploader>).uploadAudio === 'function';
 }

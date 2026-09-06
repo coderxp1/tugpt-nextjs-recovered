@@ -1,10 +1,12 @@
 import { ProviderError, extractProviderDetail } from './errors';
 import type {
   AudioSource,
+  AudioUpload,
   TranscriptionOptions,
   TranscriptionProvider,
   TranscriptionResult,
   TranscriptionSubmission,
+  TranscriptionUploader,
 } from './transcription';
 
 /**
@@ -14,8 +16,10 @@ import type {
  * Implements `TranscriptionProvider` (see `transcription.ts` for why that is a
  * separate contract rather than a wider `AIProviderAdapter`).
  *
- * Gladia's pre-recorded API is a two-step async flow:
+ * Gladia's pre-recorded API is a two-step async flow, with an optional upload
+ * in front of it for audio Gladia cannot fetch itself:
  *
+ *   POST /v2/upload            multipart 'audio' -> { audio_url }
  *   POST /v2/pre-recorded      { audio_url, … }  -> 201 { id, result_url }
  *   GET  /v2/pre-recorded/{id}                   -> { status, result?, error_code? }
  *                                                   status: queued|processing|done|error
@@ -84,6 +88,11 @@ interface GladiaSubmitResponse {
   result_url?: unknown;
 }
 
+interface GladiaUploadResponse {
+  audio_url?: unknown;
+  audio_metadata?: unknown;
+}
+
 interface GladiaPollResponse {
   id?: unknown;
   status?: unknown;
@@ -124,7 +133,7 @@ function delay(ms: number, signal?: AbortSignal): Promise<void> {
   });
 }
 
-export class GladiaAdapter implements TranscriptionProvider {
+export class GladiaAdapter implements TranscriptionProvider, TranscriptionUploader {
   readonly providerName = PROVIDER;
   private readonly apiKey: string;
   private readonly baseUrl: string;
@@ -163,6 +172,19 @@ export class GladiaAdapter implements TranscriptionProvider {
   }
 
   /**
+   * Headers for a multipart request: authentication only.
+   *
+   * Deliberately NOT `headers()` minus a field. `fetch` generates the
+   * `multipart/form-data` Content-Type together with the boundary that
+   * separates the parts; setting one by hand overrides it with a value that
+   * has no boundary, and the server then reads the body as a single
+   * unparseable blob. The failure is a 4xx that looks like a bad file.
+   */
+  private uploadHeaders(): Record<string, string> {
+    return { 'x-gladia-key': this.apiKey };
+  }
+
+  /**
    * Turn anything thrown by `fetch` into the normalized taxonomy.
    *
    * Deliberately has no `err instanceof ProviderError` passthrough. The other
@@ -186,6 +208,75 @@ export class GladiaAdapter implements TranscriptionProvider {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * POST /v2/upload — hand Gladia the bytes and get back a URL it can fetch.
+   *
+   * The URL returned is Gladia's own, on its storage, and is what `submit`
+   * then takes. Two steps rather than one because Gladia's transcription
+   * endpoint accepts only a URL; the upload is the adapter for sources the
+   * provider cannot reach, which is every WhatsApp voice note.
+   *
+   * NOTHING IS BILLED HERE. Transcription is charged on submission, so an
+   * upload that fails may be retried freely — which is why the worker's retry
+   * budget is spent on the pair rather than on this alone.
+   */
+  async uploadAudio(audio: AudioUpload, options: TranscriptionOptions = {}): Promise<AudioSource> {
+    if (audio.bytes.length === 0) {
+      // An empty upload produces a job that transcribes nothing and is billed
+      // for zero seconds — harmless in money, useless in outcome, and it
+      // would land as a successful empty transcript, which reads to a
+      // reviewer exactly like a genuinely silent recording. Refuse instead.
+      throw new ProviderError(PROVIDER, 'INVALID_REQUEST', undefined, 'Audio upload is empty.');
+    }
+
+    const form = new FormData();
+    // A fresh ArrayBuffer copy rather than a view onto the caller's buffer:
+    // Blob accepts a view, and a view into a pooled Node Buffer can carry
+    // bytes beyond its own window into the request body.
+    const copy = new Uint8Array(audio.bytes.length);
+    copy.set(audio.bytes);
+    form.append('audio', new Blob([copy], { type: audio.contentType }), audio.filename);
+
+    let response: Response;
+    try {
+      response = await fetch(`${this.baseUrl}/v2/upload`, {
+        method: 'POST',
+        headers: this.uploadHeaders(),
+        body: form,
+        ...(options.signal ? { signal: options.signal } : {}),
+      });
+    } catch (err) {
+      throw this.normalize(err);
+    }
+
+    if (!response.ok) {
+      throw ProviderError.fromHttpStatus(PROVIDER, response.status, await this.detailOf(response));
+    }
+
+    let data: GladiaUploadResponse;
+    try {
+      data = (await response.json()) as GladiaUploadResponse;
+    } catch {
+      throw new ProviderError(
+        PROVIDER,
+        'MALFORMED_PROVIDER_RESPONSE',
+        response.status,
+        'Upload response was not JSON.'
+      );
+    }
+
+    if (typeof data.audio_url !== 'string' || data.audio_url.length === 0) {
+      throw new ProviderError(
+        PROVIDER,
+        'MALFORMED_PROVIDER_RESPONSE',
+        response.status,
+        'Upload succeeded but returned no audio_url.'
+      );
+    }
+
+    return { url: data.audio_url, contentType: audio.contentType };
   }
 
   async submit(audio: AudioSource, options: TranscriptionOptions = {}): Promise<TranscriptionSubmission> {

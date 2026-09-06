@@ -193,6 +193,39 @@ services:
     # downward only as a deliberate, separate change if ever needed.
     stop_grace_period: 90s
 
+  transcription-worker:
+    build:
+      context: .
+      dockerfile: apps/worker/Dockerfile
+    image: tugpt-worker:latest
+    restart: unless-stopped
+    # Compiled output, same reasoning as the two workers above.
+    #
+    # A THIRD PROCESS, not a third loop. A transcription attempt downloads
+    # media and can then legitimately wait five minutes on Gladia; sharing a
+    # process with the draft loop would stall every draft behind one voice
+    # note. It is also the standing rule at the top of this file: one consumer
+    # per queue, and this is the only consumer of `transcription`.
+    #
+    # Safe to run today with nothing configured. It polls a queue that is empty
+    # because `voice_transcription` is false on every organization, and it
+    # needs no provider credentials at boot — the Gladia key and the Meta Graph
+    # token are read from `platform_secrets` when a job is actually claimed.
+    command: ["node", "dist/transcription-index.js"]
+    env_file:
+      - /etc/tugpt/worker.env
+    networks:
+      - tugpt
+    # SIGTERM aborts the poll loop between jobs; it does not cancel an
+    # in-flight attempt. An attempt is bounded by the media download plus
+    # GLADIA_DEFAULT_MAX_WAIT_MS (300s), so 330s is that ceiling plus a margin.
+    #
+    # Being SIGKILLed mid-attempt is survivable and deliberately so: the
+    # provider job id is written before any polling, so the redelivered job
+    # RESUMES the submission instead of paying for it twice. The grace period
+    # is here to make that path rare, not to make it safe.
+    stop_grace_period: 330s
+
 networks:
   tugpt:
     driver: bridge

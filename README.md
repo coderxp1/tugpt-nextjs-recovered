@@ -93,6 +93,21 @@ Required variables:
 | `WHATSAPP_APP_SECRET` | Meta app secret; the webhook's HMAC key. **Must be non-empty before `whatsapp_integration` is enabled** — the route refuses every request while it is blank | **Secret** (server only) |
 | `WHATSAPP_VERIFY_TOKEN` | Meta webhook verification token. Same rule | **Secret** (server only) |
 | `TUGPT_DOMAIN` | Public hostname (`tugpt.app`). Read by the Caddy reverse proxy only | Server only |
+| `TUGPT_SECRET_KEY_<ID>` | Base64 of 32 random bytes. A key ring, not one key: `<ID>` lowercased with `_` → `.` is the `key_id` written on each `platform_secrets` row, so `TUGPT_SECRET_KEY_PLATFORM_V1` is `platform.v1`. Several may be set at once — that is how rotation works | **Secret** (server only) |
+| `TRANSCRIPTION_MAX_MEDIA_BYTES` | Ceiling on one inbound voice note. Defaults to 8 MiB. A spend control, not a storage one: Gladia bills per second and bytes are the only proxy for duration before decoding | Server only |
+
+**Two credentials are deliberately NOT environment variables.** The Gladia API
+key and the Meta Graph access token live in `platform_secrets` (migration
+`20260903000003`), encrypted by the application under a key the database never
+holds. Adding `GLADIA_API_KEY` or a Graph token variable here will not be read
+by anything. `docs/credential-handover.md` is the procedure for installing and
+rotating them — the value is typed at a prompt with echo off, so it never
+reaches shell history, argv, or a log.
+
+The Graph token is used **only to download inbound audio**. The client that
+holds it issues GET requests and has no code path that POSTs;
+`whatsapp_integration` still gates every send, and
+`apps/worker/tests/outbound-gate.test.ts` asserts both against the source.
 
 **Model selection is a rotation, not `auto`.** `LANGDOCK_ALLOWED_MODELS` in
 `packages/ai-providers/src/langdock.ts` is the four-model allowlist, and anything

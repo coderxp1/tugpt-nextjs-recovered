@@ -4,6 +4,7 @@ import {
   GLADIA_DEFAULT_BASE_URL,
   GLADIA_MIN_POLL_INTERVAL_MS,
 } from './gladia';
+import { supportsAudioUpload } from './transcription';
 import { ProviderError } from './errors';
 
 /**
@@ -530,5 +531,178 @@ describe('GladiaAdapter — transcribe', () => {
     fetchMock.mockResolvedValueOnce(json({ error: { message: 'bad key' } }, 401));
     await expect(adapter().transcribe(AUDIO)).rejects.toThrow(ProviderError);
     expect(fetchMock).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('GladiaAdapter — uploadAudio', () => {
+  const BYTES = new Uint8Array([0x4f, 0x67, 0x67, 0x53, 0x01, 0x02, 0x03]);
+  const UPLOAD = { bytes: BYTES, filename: 'voice-note.ogg', contentType: 'audio/ogg' };
+
+  it('posts multipart to /v2/upload and returns the URL Gladia can fetch', async () => {
+    fetchMock.mockResolvedValueOnce(json({ audio_url: 'https://gladia.example/u/abc.ogg' }, 200));
+
+    const source = await adapter().uploadAudio(UPLOAD);
+
+    expect(source).toEqual({
+      url: 'https://gladia.example/u/abc.ogg',
+      contentType: 'audio/ogg',
+    });
+    const [url, init] = fetchMock.mock.calls[0];
+    expect(url).toBe(`${GLADIA_DEFAULT_BASE_URL}/v2/upload`);
+    expect(init.method).toBe('POST');
+    expect(init.body).toBeInstanceOf(FormData);
+  });
+
+  /**
+   * The one that is easy to get wrong and hard to diagnose. `fetch` generates
+   * the multipart Content-Type together with the boundary; a hand-set header
+   * replaces it with one that has no boundary, and the server then reads the
+   * whole body as a single unparseable blob and answers 4xx as though the file
+   * were bad.
+   */
+  it('sets no Content-Type, leaving fetch to generate the multipart boundary', async () => {
+    fetchMock.mockResolvedValueOnce(json({ audio_url: 'https://gladia.example/u/abc.ogg' }));
+    await adapter().uploadAudio(UPLOAD);
+
+    const headers = fetchMock.mock.calls[0][1].headers as Record<string, string>;
+    expect(headers['x-gladia-key']).toBe(KEY);
+    expect(Object.keys(headers).map((k) => k.toLowerCase())).not.toContain('content-type');
+  });
+
+  it('sends the audio under the field name and filename Gladia expects', async () => {
+    fetchMock.mockResolvedValueOnce(json({ audio_url: 'https://gladia.example/u/abc.ogg' }));
+    await adapter().uploadAudio(UPLOAD);
+
+    const form = fetchMock.mock.calls[0][1].body as FormData;
+    const part = form.get('audio') as File;
+    expect(part).toBeInstanceOf(Blob);
+    expect(part.name).toBe('voice-note.ogg');
+    expect(part.type).toBe('audio/ogg');
+    expect(await part.arrayBuffer()).toEqual(BYTES.buffer.slice(0, BYTES.length));
+  });
+
+  /**
+   * A Blob built from a view onto a pooled Node Buffer carries the whole
+   * underlying ArrayBuffer, not the view's window — so a 7-byte voice note can
+   * arrive as 8 KiB of whatever else that pool held. The adapter copies; this
+   * asserts the copy, by uploading a view whose backing buffer is larger than
+   * the view.
+   */
+  it('uploads exactly the bytes it was given, not the buffer behind them', async () => {
+    const pool = new Uint8Array(64).fill(0xff);
+    const view = pool.subarray(8, 15);
+    view.set(BYTES);
+
+    fetchMock.mockResolvedValueOnce(json({ audio_url: 'https://gladia.example/u/abc.ogg' }));
+    await adapter().uploadAudio({ ...UPLOAD, bytes: view });
+
+    const part = (fetchMock.mock.calls[0][1].body as FormData).get('audio') as File;
+    expect(part.size).toBe(7);
+    expect(new Uint8Array(await part.arrayBuffer())).toEqual(BYTES);
+  });
+
+  it('refuses an empty upload rather than producing a plausible silent transcript', async () => {
+    await expectRejection(
+      adapter().uploadAudio({ ...UPLOAD, bytes: new Uint8Array(0) }),
+      'INVALID_REQUEST',
+      /empty/i
+    );
+    expect(fetchMock).not.toHaveBeenCalled();
+  });
+
+  it('maps an HTTP failure through the shared taxonomy, detail and all', async () => {
+    fetchMock.mockResolvedValueOnce(json({ error: { message: 'audio file is too large' } }, 400));
+    await expectRejection(adapter().uploadAudio(UPLOAD), 'HTTP_400', /too large/);
+  });
+
+  // Status-specific categories, not a generic HTTP bucket. The worker's retry
+  // budget is spent on the difference: a 503 during upload costs nothing and
+  // deserves a retry, a 401 will fail identically three times. That decision
+  // lives in the worker (isTransientTranscriptionCategory); what the adapter
+  // owes it is a category precise enough to make it.
+  it('classifies an upload 401 distinctly from a 5xx, with the status kept', async () => {
+    fetchMock.mockResolvedValueOnce(json({ error: { message: 'bad key' } }, 401));
+    const err = await expectRejection(adapter().uploadAudio(UPLOAD), 'HTTP_401');
+    expect(err.httpStatus).toBe(401);
+  });
+
+  it('classifies an upload 503 as HTTP_5XX', async () => {
+    fetchMock.mockResolvedValueOnce(json({ error: { message: 'down' } }, 503));
+    const err = await expectRejection(adapter().uploadAudio(UPLOAD), 'HTTP_5XX');
+    expect(err.httpStatus).toBe(503);
+  });
+
+  it('rejects a 200 that carries no audio_url instead of returning undefined', async () => {
+    fetchMock.mockResolvedValueOnce(json({ audio_metadata: { audio_duration: 3 } }));
+    await expectRejection(
+      adapter().uploadAudio(UPLOAD),
+      'MALFORMED_PROVIDER_RESPONSE',
+      /no audio_url/
+    );
+  });
+
+  it('rejects a non-JSON upload response', async () => {
+    fetchMock.mockResolvedValueOnce(new Response('<html>502</html>', { status: 200 }));
+    await expectRejection(adapter().uploadAudio(UPLOAD), 'MALFORMED_PROVIDER_RESPONSE', /not JSON/);
+  });
+
+  it('surfaces a network failure as NETWORK_FAILURE', async () => {
+    fetchMock.mockRejectedValueOnce(new TypeError('fetch failed'));
+    await expectRejection(adapter().uploadAudio(UPLOAD), 'NETWORK_FAILURE');
+  });
+
+  it('passes the abort signal through', async () => {
+    const controller = new AbortController();
+    fetchMock.mockResolvedValueOnce(json({ audio_url: 'https://gladia.example/u/abc.ogg' }));
+    await adapter().uploadAudio(UPLOAD, { signal: controller.signal });
+    expect(fetchMock.mock.calls[0][1].signal).toBe(controller.signal);
+  });
+
+  /**
+   * The composition the worker actually performs. Asserted end to end because
+   * the value that has to survive the join — Gladia's own audio_url — is
+   * produced by one call and consumed by the next, and a mistake there is a
+   * submission against a URL nobody uploaded to.
+   */
+  it('composes with submit: the uploaded URL is what gets transcribed', async () => {
+    fetchMock
+      .mockResolvedValueOnce(json({ audio_url: 'https://gladia.example/u/xyz.ogg' }))
+      .mockResolvedValueOnce(json({ id: 'job-up' }, 201))
+      .mockResolvedValueOnce(json(doneJob()));
+
+    const a = adapter();
+    const source = await a.uploadAudio(UPLOAD);
+    const result = await a.transcribe(source);
+
+    expect(JSON.parse(fetchMock.mock.calls[1][1].body).audio_url).toBe(
+      'https://gladia.example/u/xyz.ogg'
+    );
+    expect(result.text).toBe('hola, quiero reservar una mesa');
+  });
+});
+
+describe('supportsAudioUpload', () => {
+  it('narrows the Gladia adapter, which implements both contracts', () => {
+    expect(supportsAudioUpload(adapter())).toBe(true);
+  });
+
+  /**
+   * The negative control. Without it this guard would pass for a function that
+   * returned true unconditionally — which is exactly the shape of the bug it
+   * exists to prevent, since a caller uses it to decide whether to upload or
+   * to hand over a URL the provider cannot fetch.
+   */
+  it('rejects a transcription provider that cannot take an upload', () => {
+    const urlOnly = {
+      providerName: 'url-only',
+      submit: async () => ({ id: 'x', provider: 'url-only' }),
+      awaitResult: async () => {
+        throw new Error('not used');
+      },
+      transcribe: async () => {
+        throw new Error('not used');
+      },
+    };
+    expect(supportsAudioUpload(urlOnly as never)).toBe(false);
   });
 });

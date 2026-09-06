@@ -9,3 +9,4 @@
 // enforcement point.
 export * from './whatsapp-signature';
 export * from './secret-crypto';
+export * from './secret-store';
