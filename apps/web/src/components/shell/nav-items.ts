@@ -24,6 +24,11 @@ export interface NavItem {
 export const NAV_ITEMS: readonly NavItem[] = [
   { href: '/dashboard/inbox', labelKey: 'nav.inbox' },
   { href: '/dashboard/drafts', labelKey: 'nav.drafts' },
+  // Last, and deliberately: the inbox answers "who is waiting" and the drafts
+  // answer "what did the AI write" — both are the reviewer's job. Usage & cost
+  // answers "what is this costing", which is the owner's question, and it is
+  // the one a reviewer opens least.
+  { href: '/dashboard/analytics', labelKey: 'nav.analytics' },
 ];
 
 /**

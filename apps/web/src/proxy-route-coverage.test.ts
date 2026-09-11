@@ -93,6 +93,12 @@ const ROUTES: RouteExpectation[] = [
     type: 'protected',
     why: 'Draft detail. The proxy is the only gate on the page shell.',
   },
+  {
+    path: '/dashboard/analytics',
+    kind: 'page',
+    type: 'protected',
+    why: 'Usage & cost report. The proxy is the only gate on the page shell; the data itself comes from a membership-checked RPC.',
+  },
 
   // Every /api/v1 route below is 'public' to the proxy on purpose: the proxy
   // performs no authentication for them, and each handler authenticates for
@@ -178,6 +184,17 @@ const ROUTES: RouteExpectation[] = [
       'draft routes before reading; every query is scoped by organization_id and RLS ' +
       'scopes conversations to org members. Returns masked contacts and no message text ' +
       'at all, asserted in conversations-route.test.ts.',
+  },
+  {
+    path: '/api/v1/analytics/usage',
+    kind: 'api',
+    type: 'public',
+    why:
+      'Handler authenticates and resolves tenant; the org_usage_summary RPC re-checks ' +
+      'membership from the session claims (auth.uid()) inside the definer and returns an ' +
+      'aggregate only — no per-row usage, no customer identifiers. provider_usage_events ' +
+      'stays service_role-only; this is a read path over an aggregate, asserted in ' +
+      'analytics-usage-route.test.ts.',
   },
   {
     path: '/api/v1/conversations/[conversationId]/assign',
