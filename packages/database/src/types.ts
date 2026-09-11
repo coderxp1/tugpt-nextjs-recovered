@@ -573,6 +573,61 @@ export interface ResolvedEntitlement {
 }
 
 /**
+ * One native-currency cost total from `public.org_usage_summary`.
+ *
+ * A list rather than a single number because an organization can be billed by
+ * one provider in USD and another in EUR (20260903000005), and summing across
+ * currencies without converting them produces a number that means nothing.
+ */
+export interface UsageCostTotal {
+  currency: string;
+  /** Micro-units: 25000 is 0.025 of `currency`. */
+  cost_micros: number;
+}
+
+/** One (provider, model, modality) group of `public.org_usage_summary`. */
+export interface UsageProviderGroup {
+  provider: string;
+  /** As REPORTED by the adapter; `null` when the provider did not name one. */
+  model: string | null;
+  modality: 'text' | 'audio';
+  events: number;
+  /**
+   * Events with no price in the book. Their cost is unknown and contributes
+   * to no total — it is NOT valued at zero anywhere in this shape.
+   */
+  unpriced_events: number;
+  /**
+   * Priced events whose currency had no fx rate at their instant: present in
+   * `costs` (native), absent from `accounting_cost_micros`.
+   */
+  unconverted_events: number;
+  /** Sum of converted costs only; see `unconverted_events` for the gap. */
+  accounting_cost_micros: number;
+  /** Sums per dimension (`input_tokens`, `output_tokens`, `audio_seconds`). */
+  quantities: Record<string, number>;
+  costs: UsageCostTotal[];
+}
+
+/** The JSONB returned by `public.org_usage_summary(uuid, timestamptz, timestamptz)`. */
+export interface UsageSummary {
+  organization_id: string;
+  /** `from` inclusive, `to` exclusive. */
+  window: { from: string; to: string };
+  accounting_currency: string;
+  totals: {
+    events: number;
+    priced_events: number;
+    unpriced_events: number;
+    unconverted_events: number;
+    accounting_cost_micros: number;
+    quantities: Record<string, number>;
+    costs_by_currency: UsageCostTotal[];
+  };
+  by_provider: UsageProviderGroup[];
+}
+
+/**
  * A person an organization talks to.
  *
  * Identity is `(organization_id, phone)` and deliberately NOT scoped to a
@@ -859,6 +914,16 @@ export interface Database {
           p_organization_id: string;
         };
         Returns: ResolvedEntitlement[];
+      };
+      org_usage_summary: {
+        Args: {
+          p_organization_id: string;
+          /** Inclusive. ISO timestamp on the wire. */
+          p_from: string;
+          /** Exclusive. ISO timestamp on the wire. */
+          p_to: string;
+        };
+        Returns: UsageSummary;
       };
       create_organization_with_owner: {
         Args: {
