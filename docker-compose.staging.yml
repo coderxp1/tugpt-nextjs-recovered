@@ -1,0 +1,50 @@
+# docker-compose.staging.yml
+#
+# Staging and recovery rehearsal runtime for TuGPT on shared GPU host (31.47.228.55).
+# See ADR-018 for architectural decisions and governance.
+#
+# Isolation guarantees:
+# 1. Runs under project namespace `-p tugpt-staging`.
+# 2. Binds strictly to 127.0.0.1:3002 (never 0.0.0.0, never conflicting with 3001 or 8188).
+# 3. Uses dedicated bridge network `tugpt_staging_net` with no host networking.
+# 4. Zero GPU devices allocated (GPU moratorium active).
+# 5. Production queue workers are EXCLUDED to prevent duplicate consumption.
+# 6. Strict cgroup CPU, Memory, and PIDs limits on every container.
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: apps/web/Dockerfile
+      args:
+        NEXT_PUBLIC_SUPABASE_URL: "${NEXT_PUBLIC_SUPABASE_URL:?missing - source /etc/tugpt/staging.env}"
+        NEXT_PUBLIC_SUPABASE_ANON_KEY: "${NEXT_PUBLIC_SUPABASE_ANON_KEY:?missing - source /etc/tugpt/staging.env}"
+    image: tugpt-web:staging
+    restart: "no"
+    env_file:
+      - /etc/tugpt/staging.env
+    ports:
+      - "127.0.0.1:3002:3000"
+    networks:
+      - tugpt_staging_net
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+          pids: 100
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    security_opt:
+      - no-new-privileges:true
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  tugpt_staging_net:
+    driver: bridge
