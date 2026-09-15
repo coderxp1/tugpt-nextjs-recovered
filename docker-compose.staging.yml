@@ -22,7 +22,7 @@ services:
     image: tugpt-web:staging
     restart: "no"
     env_file:
-      - /etc/tugpt/staging.env
+      - ${TUGPT_STAGING_ENV_FILE:-/etc/tugpt/staging.env}
     ports:
       - "127.0.0.1:3002:3000"
     networks:
@@ -38,6 +38,15 @@ services:
           memory: 512M
     security_opt:
       - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
     healthcheck:
       test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/api/v1/health"]
       interval: 15s
