@@ -106,7 +106,7 @@ function walk(dir: string, out: string[]): void {
       continue;
     }
     if (isDir) walk(full, out);
-    else out.push(path.relative(REPO_ROOT, full));
+    else out.push(path.relative(REPO_ROOT, full).split(path.sep).join('/'));
   }
 }
 
