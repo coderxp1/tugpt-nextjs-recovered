@@ -1,6 +1,8 @@
 # ADR-018: Shared GPU Host Isolation, Resource Governance, and Staging Rehearsal
 
-**Status:** PROPOSED  
+## Status
+Proposed
+
 **Date:** 2026-09-15  
 **Deciders:** Klaus Hoffmann, TuGPT Technical Review, TuGPT Infrastructure Team, Antigravity Development Team  
 **Consulted:** ADR-006, ADR-010, ADR-013, ADR-014, ADR-015  
