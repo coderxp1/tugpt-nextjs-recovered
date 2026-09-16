@@ -1,0 +1,19 @@
+{
+  "schemaVersion": "1.0.0",
+  "approvedImage": "tugpt-web@sha256:0ad074799abb27b96cc85c3e31ac50f9ee417595fff2e29088a3a093e634e54e",
+  "approvedRepositories": [
+    "tugpt-web",
+    "ghcr.io/coderxp1/tugpt-web",
+    "docker.io/library/tugpt-web"
+  ],
+  "approvedDigest": "sha256:0ad074799abb27b96cc85c3e31ac50f9ee417595fff2e29088a3a093e634e54e",
+  "sourceCommit": "65f01778f62375f08592c4eb8043cd33b8ab52b6",
+  "targetEnvironment": "staging",
+  "buildTimestamp": "2026-09-15T23:56:51Z",
+  "buildArguments": {
+    "NEXT_PUBLIC_SUPABASE_URL": "https://staging.example.supabase.co",
+    "NEXT_PUBLIC_SUPABASE_ANON_KEY": "synthetic-staging-anon-key"
+  },
+  "approvedStagingProjectRef": "staging.example",
+  "approvedStagingSupabaseUrl": "https://staging.example.supabase.co"
+}

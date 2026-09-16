@@ -40,76 +40,25 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
 import path from 'node:path';
+import {
+  findSourceFiles,
+  scanFeatureFlags,
+  FEATURE_FLAG_TABLE,
+  FEATURE_FLAG_SQL_READ,
+  DEFAULT_ALLOWED_TS_FLAGS,
+  DEFAULT_ALLOWED_SQL_FLAGS,
+} from './helpers/architectural-guards';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
-const TABLE = 'feature_flags';
+const TABLE = FEATURE_FLAG_TABLE;
+const ALLOWED_TS = DEFAULT_ALLOWED_TS_FLAGS;
+const ALLOWED_SQL = DEFAULT_ALLOWED_SQL_FLAGS;
+const SQL_READ = FEATURE_FLAG_SQL_READ;
 
-/**
- * TypeScript files permitted to mention `feature_flags`, and why each one is
- * not an authorization decision.
- */
-const ALLOWED_TS = new Map<string, string>([
-  [
-    'packages/database/src/types.ts',
-    'Generated Supabase type map. Declares the table shape; performs no query.',
-  ],
-  [
-    'apps/worker/src/e2e/milestone1.ts',
-    'E2E harness. Arms the global row and an org row as test setup, then restores ' +
-      'them on teardown. It also calls is_feature_enabled to assert the resolved ' +
-      'answer rather than inferring it from the rows it just wrote — which is the ' +
-      'behaviour this guard exists to require.',
-  ],
-]);
-
-/**
- * Migrations permitted to read `feature_flags`, and why.
- *
- * Writes are not listed: creating or flipping a row is what the table is for,
- * and a write cannot silently become a second source of truth for "is this on".
- * Reads can, which is why only reads are guarded here.
- */
-const ALLOWED_SQL = new Map<string, string>([
-  [
-    '20260805000013_create_is_feature_enabled_rpc.sql',
-    'Defines is_feature_enabled. This is the sanctioned reader.',
-  ],
-  [
-    '20260826000001_draft_quota_period_lifecycle.sql',
-    'enable_draft_generation_for_org reads the global row to REPORT it as the ' +
-      'global_flag_enabled output. The authoritative answer in that same function ' +
-      'comes from calling is_feature_enabled, not from this read.',
-  ],
-]);
-
-const SQL_READ = /FROM\s+(?:public\.)?feature_flags/i;
-
-/** Every .ts/.tsx file under the given roots, skipping build output and deps. */
 function sourceFiles(roots: string[]): string[] {
-  const out: string[] = [];
-  const walk = (dir: string): void => {
-    let entries: string[];
-    try {
-      entries = readdirSync(dir);
-    } catch {
-      return;
-    }
-    for (const entry of entries) {
-      if (entry === 'node_modules' || entry === 'dist' || entry === '.next' || entry === '.turbo') {
-        continue;
-      }
-      const full = path.join(dir, entry);
-      if (statSync(full).isDirectory()) {
-        walk(full);
-      } else if (/\.tsx?$/.test(entry)) {
-        out.push(path.relative(REPO_ROOT, full).split(path.sep).join('/'));
-      }
-    }
-  };
-  for (const root of roots) walk(path.join(REPO_ROOT, root));
-  return out;
+  return findSourceFiles(REPO_ROOT, roots);
 }
 
 function migrationFiles(): string[] {
@@ -126,16 +75,11 @@ describe('is_feature_enabled is the only reader of feature_flags', () => {
   });
 
   it('no TypeScript outside the allowlist touches feature_flags', () => {
-    const offenders = sourceFiles(['apps', 'packages'])
-      .filter((rel) => !ALLOWED_TS.has(rel))
-      // Test files are allowed to name the table when they are asserting about
-      // it — including this one, which necessarily contains the string.
-      .filter((rel) => !/\.test\.tsx?$/.test(rel))
-      .filter((rel) => readFileSync(path.join(REPO_ROOT, rel), 'utf8').includes(TABLE));
+    const { tsViolations } = scanFeatureFlags(REPO_ROOT);
 
     expect(
-      offenders,
-      `These files query feature_flags directly:\n  ${offenders.join('\n  ')}\n\n` +
+      tsViolations,
+      `These files query feature_flags directly:\n  ${tsViolations.join('\n  ')}\n\n` +
         `Call public.is_feature_enabled(org_id, key) instead. It ANDs the global row ` +
         `with the org row and is the only place that answers whether a capability is ` +
         `on. A second reader breaks that guarantee, and the quota trigger in ` +
@@ -146,15 +90,11 @@ describe('is_feature_enabled is the only reader of feature_flags', () => {
   });
 
   it('no migration outside the allowlist reads feature_flags', () => {
-    const offenders = migrationFiles()
-      .filter((name) => !ALLOWED_SQL.has(name))
-      .filter((name) =>
-        SQL_READ.test(readFileSync(path.join(REPO_ROOT, 'supabase', 'migrations', name), 'utf8'))
-      );
+    const { sqlViolations } = scanFeatureFlags(REPO_ROOT);
 
     expect(
-      offenders,
-      `These migrations read feature_flags:\n  ${offenders.join('\n  ')}\n\n` +
+      sqlViolations,
+      `These migrations read feature_flags:\n  ${sqlViolations.join('\n  ')}\n\n` +
         `A function that reads the table to decide whether something is enabled is a ` +
         `second source of truth. Call public.is_feature_enabled instead, or add the ` +
         `migration to ALLOWED_SQL with a sentence saying why its read is not an ` +

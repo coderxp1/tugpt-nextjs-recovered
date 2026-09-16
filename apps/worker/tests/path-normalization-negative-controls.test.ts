@@ -2,65 +2,67 @@
  * @file path-normalization-negative-controls.test.ts
  * @description Negative control test suite verifying that each of the repository's
  * five path-normalized architectural guards triggers an expected failure when exposed
- * to deliberately violating fixtures.
+ * to deliberately violating fixtures on disk across relevant path forms.
+ *
+ * All scanner helpers are imported exclusively from the non-test module
+ * `apps/worker/tests/helpers/architectural-guards.ts` to avoid re-registering test suites.
  *
  * SCOPE:
- * 1. Direct `feature_flags` query detector (feature-flag-sole-reader)
- * 2. Prohibited dead domain detector (no-dead-domain)
- * 3. Unreserved fixture email domain detector (fixture-emails-are-reserved)
- * 4. Phantom systemd unit command detector (no-phantom-units)
- * 5. Cut provider import / construction detector (production-never-imports-cut-providers)
+ * 1. Direct `feature_flags` query detector (scanFeatureFlags)
+ * 2. Prohibited dead domain detector (scanDeadDomains)
+ * 3. Unreserved fixture email domain detector (scanFixtureEmails)
+ * 4. Phantom systemd unit command detector (scanPhantomUnits)
+ * 5. Cut provider import / construction detector (scanCutProviders)
+ * 6. Path-separator normalization guarantees across platforms
  */
 
 import { describe, expect, it } from 'vitest';
-import { mkdtempSync, rmSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdtempSync, rmSync, mkdirSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
-// Imported from sibling guards
-import { reachesIn, CUT_ADAPTERS } from './production-never-imports-cut-providers.test';
-import { isReservedEmailDomain, emailsIn } from './fixture-emails-are-reserved.test';
-import { unitsOnLine, instructionLines } from './no-phantom-units.test';
+import {
+  scanFeatureFlags,
+  scanDeadDomains,
+  scanFixtureEmails,
+  scanPhantomUnits,
+  scanCutProviders,
+  normalizePath,
+} from './helpers/architectural-guards';
 
 describe('negative controls: feature-flag-sole-reader guard', () => {
-  const TABLE = 'feature_flags';
-  const SQL_READ = /FROM\s+(?:public\.)?feature_flags/i;
-
-  it('detects an unauthorized TypeScript reader querying feature_flags directly', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'ff-neg-ts-'));
+  it('detects unauthorized TypeScript reader and SQL migration querying feature_flags directly', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'ff-neg-disk-'));
     try {
-      const filePath = path.join(dir, 'unauthorized-service.ts');
-      const badSource = [
+      const srcDir = path.join(dir, 'apps', 'worker', 'src');
+      const migDir = path.join(dir, 'supabase', 'migrations');
+      mkdirSync(srcDir, { recursive: true });
+      mkdirSync(migDir, { recursive: true });
+
+      const badTs = [
         "import { SupabaseClient } from '@supabase/supabase-js';",
         'export async function checkFlag(client: SupabaseClient) {',
-        `  return client.from('${TABLE}').select('*').eq('key', 'test');`,
+        "  return client.from('feature' + '_flags').select('*').eq('key', 'test');",
         '}',
       ].join('\n');
-      writeFileSync(filePath, badSource);
+      writeFileSync(path.join(srcDir, 'violating-service.ts'), badTs.replace("('feature' + '_flags')", "('feature_flags')"));
 
-      const content = readFileSync(filePath, 'utf8');
-      const violates = content.includes(TABLE);
-      expect(violates, 'should detect table mention in non-allowlisted TS').toBe(true);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('detects an unauthorized SQL migration reading feature_flags directly', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'ff-neg-sql-'));
-    try {
-      const sqlPath = path.join(dir, '20269999000000_unauthorized_reader.sql');
       const badSql = [
         'CREATE OR REPLACE FUNCTION check_permission() RETURNS boolean AS $$',
         'BEGIN',
-        `  RETURN EXISTS (SELECT 1 FROM ${TABLE} WHERE key = 'test' AND is_enabled = true);`,
+        '  RETURN EXISTS (SELECT 1 FROM public.feature_flags WHERE key = \'test\' AND is_enabled = true);',
         'END;',
         '$$ LANGUAGE plpgsql;',
       ].join('\n');
-      writeFileSync(sqlPath, badSql);
+      writeFileSync(path.join(migDir, '20269999000000_unauthorized_reader.sql'), badSql);
 
-      const content = readFileSync(sqlPath, 'utf8');
-      expect(SQL_READ.test(content), 'should detect direct SQL read from feature_flags').toBe(true);
+      const { tsViolations, sqlViolations } = scanFeatureFlags(dir, {
+        roots: ['apps'],
+        migrationDir: migDir,
+      });
+
+      expect(tsViolations).toEqual(['apps/worker/src/violating-service.ts']);
+      expect(sqlViolations).toEqual(['20269999000000_unauthorized_reader.sql']);
     } finally {
       rmSync(dir, { recursive: true, force: true });
     }
@@ -68,142 +70,198 @@ describe('negative controls: feature-flag-sole-reader guard', () => {
 });
 
 describe('negative controls: no-dead-domain guard', () => {
-  // Constructed dynamically to prevent static scanners from matching this test file
+  // Dynamically constructed tokens to prevent scanner self-matching
   const deadHost = ['tugpt', 'ai'].join('.');
   const deadHyphen = ['tugpt', 'ai'].join('-');
   const deadRegex = ['tugpt', 'ai'].join('\\.');
   const deadUnderscore = ['TUGPT', 'AI'].join('_');
-  const DEAD_DOMAIN = /tugpt\\?[._-]ai(?![-a-z0-9])/i;
 
-  it('triggers on prohibited dead domain hostnames and identifiers', () => {
-    const violatingInputs = [
-      `https://${deadHost}/api/v1/health`,
-      `assert_matches 'ok +cert +${deadRegex} valid'`,
-      `project_id = "${deadHyphen}"`,
-      `${deadUnderscore}_CONFIG = "true"`,
-      `owner@${deadHost}`,
-    ];
+  it('detects dead domain occurrences across apps, deploy, supabase, and compose files on disk', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'dead-domain-disk-'));
+    try {
+      const appDir = path.join(dir, 'apps', 'worker', 'src');
+      const deployDir = path.join(dir, 'deploy');
+      const migDir = path.join(dir, 'supabase', 'migrations');
+      mkdirSync(appDir, { recursive: true });
+      mkdirSync(deployDir, { recursive: true });
+      mkdirSync(migDir, { recursive: true });
 
-    for (const input of violatingInputs) {
-      expect(DEAD_DOMAIN.test(input), `Expected "${input}" to be flagged as dead domain violation`).toBe(true);
-    }
-  });
+      writeFileSync(path.join(appDir, 'bad-endpoint.ts'), `export const url = "https://${deadHost}/api";\n`);
+      writeFileSync(path.join(deployDir, 'bad-cert.sh'), `assert_matches 'ok +cert +${deadRegex} valid'\n`);
+      writeFileSync(path.join(migDir, 'bad-config.sql'), `INSERT INTO config VALUES ('${deadHyphen}');\n`);
+      writeFileSync(path.join(dir, 'docker-compose.yml'), `services:\n  web:\n    image: ${deadUnderscore}:latest\n`);
 
-  it('does not falsely trigger on legitimate workspace packages or canonical domain', () => {
-    const legitimateInputs = [
-      "import x from '@tugpt/ai-providers';",
-      "@tugpt/ai-orchestration@0.1.0",
-      "https://tugpt.app/api/v1/health",
-    ];
+      const violations = scanDeadDomains(dir, {
+        guardedRoots: ['apps', 'deploy', 'supabase'],
+        guardedFiles: ['docker-compose.yml'],
+      });
 
-    for (const input of legitimateInputs) {
-      expect(DEAD_DOMAIN.test(input), `Expected "${input}" to be clean`).toBe(false);
+      expect(violations.sort()).toEqual([
+        'apps/worker/src/bad-endpoint.ts',
+        'deploy/bad-cert.sh',
+        'docker-compose.yml',
+        'supabase/migrations/bad-config.sql',
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
 });
 
 describe('negative controls: fixture-emails-are-reserved guard', () => {
-  it('extracts and flags non-reserved email addresses as violations', () => {
-    // Dynamically constructed non-reserved email addresses
-    const badDomain1 = ['tugpt', 'ai'].join('.');
-    const badDomain2 = 'test.com';
-    const badDomain3 = 'gmail.com';
+  it('detects unreserved fixture emails in test files across on-disk fixture trees', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'emails-neg-disk-'));
+    try {
+      const workerTests = path.join(dir, 'apps', 'worker', 'tests');
+      const sqlTests = path.join(dir, 'supabase', 'tests');
+      mkdirSync(workerTests, { recursive: true });
+      mkdirSync(sqlTests, { recursive: true });
 
-    const source = [
-      `const owner = 'user@${badDomain1}';`,
-      `const invitee = 'invitee@${badDomain2}';`,
-      `const stranger = 'person@${badDomain3}';`,
-      `const legitimate = 'valid@example.com';`,
-    ].join('\n');
+      const badDomain1 = ['tugpt', 'ai'].join('.');
+      const unreservedEmail1 = ['invitee', 'test.com'].join('@');
+      const unreservedEmail2 = ['stranger', 'gmail.com'].join('@');
+      const testFileName = ['fixture-unreserved', 'test', 'ts'].join('.');
+      const badTs = [
+        `const owner = 'user@${badDomain1}';`,
+        `const invitee = '${unreservedEmail1}';`,
+        "const legitimate = 'valid@example.com';",
+      ].join('\n');
+      writeFileSync(path.join(workerTests, testFileName), badTs);
 
-    const found = emailsIn(source);
-    expect(found).toHaveLength(4);
+      const badSql = `INSERT INTO users VALUES ('${unreservedEmail2}'), ('admin@localhost');`;
+      writeFileSync(path.join(sqlTests, 'violating.test.sql'), badSql);
 
-    const violations = found.filter((email) => {
-      const domain = email.split('@')[1];
-      return !isReservedEmailDomain(domain);
-    });
+      const results = scanFixtureEmails(dir, {
+        roots: ['apps', 'supabase/tests'],
+      });
 
-    expect(violations).toEqual([
-      `user@${badDomain1}`,
-      `invitee@${badDomain2}`,
-      `person@${badDomain3}`,
-    ]);
+      const mapped = results.map((r) => ({
+        file: r.file,
+        violations: r.violations.sort(),
+      }));
+
+      expect(mapped).toEqual([
+        {
+          file: `apps/worker/tests/${testFileName}`,
+          violations: [unreservedEmail1, `user@${badDomain1}`].sort(),
+        },
+        {
+          file: 'supabase/tests/violating.test.sql',
+          violations: [unreservedEmail2],
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
   });
 });
 
 describe('negative controls: no-phantom-units guard', () => {
-  // Construct runner and unit tokens dynamically to avoid matching line-scoped scanners
-  const runnerCmd = 'system' + 'ctl';
-  const journalCmd = 'journal' + 'ctl';
-  const phantom1 = 'tugpt-' + 'draft-worker';
-  const phantom2 = 'tugpt-' + 'whatsapp-worker';
+  it('detects phantom systemd unit commands in deployment scripts and docs on disk', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'units-neg-disk-'));
+    try {
+      const systemdDir = path.join(dir, 'deploy', 'systemd');
+      const docsDir = path.join(dir, 'docs');
+      mkdirSync(systemdDir, { recursive: true });
+      mkdirSync(docsDir, { recursive: true });
 
-  it('detects phantom units in systemctl and journalctl command lines', () => {
-    const line1 = `${runnerCmd} restart ${phantom1}`;
-    const line2 = `${journalCmd} -u ${phantom2} --follow`;
+      // Real unit in systemd
+      writeFileSync(path.join(systemdDir, 'tugpt.service'), '[Unit]\nDescription=Real Unit\n');
 
-    expect(unitsOnLine(line1)).toEqual([phantom1]);
-    expect(unitsOnLine(line2)).toEqual([phantom2]);
-  });
+      // Violating shell script
+      const runnerCmd = 'system' + 'ctl';
+      const journalCmd = 'journal' + 'ctl';
+      const phantom1 = 'tugpt-' + 'draft-worker';
+      const phantom2 = 'tugpt-' + 'whatsapp-worker';
 
-  it('flags markdown fenced code blocks that drive phantom units', () => {
-    const md = [
-      '# Operations Guide',
-      '',
-      '```bash',
-      `sudo ${runnerCmd} restart ${phantom1}`,
-      '```',
-      '',
-      'Some prose mentioning the old worker is fine.',
-    ].join('\n');
+      writeFileSync(
+        path.join(dir, 'deploy', 'bad-rollout.sh'),
+        `#!/bin/bash\n${runnerCmd} restart ${phantom1}\n`
+      );
 
-    const lines = instructionLines(md, true);
-    const offenders: string[] = [];
-    for (const { text } of lines) {
-      for (const unit of unitsOnLine(text)) {
-        if (unit === phantom1) offenders.push(unit);
-      }
+      // Violating markdown document with fenced code
+      const badMd = [
+        '# Operations Runbook',
+        '',
+        '```bash',
+        `${journalCmd} -u ${phantom2} --follow`,
+        '```',
+        '',
+        'Prose naming the phantom unit tugpt-draft-worker is not an instruction.',
+      ].join('\n');
+      writeFileSync(path.join(docsDir, 'runbook.md'), badMd);
+
+      const violations = scanPhantomUnits(dir, { systemdDir });
+
+      expect(violations).toEqual([
+        {
+          file: 'docs/runbook.md',
+          line: 4,
+          unit: phantom2,
+          text: `${journalCmd} -u ${phantom2} --follow`,
+        },
+        {
+          file: 'deploy/bad-rollout.sh',
+          line: 2,
+          unit: phantom1,
+          text: `${runnerCmd} restart ${phantom1}`,
+        },
+      ]);
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
-
-    expect(offenders).toEqual([phantom1]);
   });
 });
 
 describe('negative controls: production-never-imports-cut-providers guard', () => {
-  it('detects imports of cut adapters (LogiccAdapter and AnymizeAdapter)', () => {
-    for (const adapter of CUT_ADAPTERS) {
-      const namedImport = `import { ${adapter} } from '@tugpt/ai-providers';`;
-      const hitsNamed = reachesIn(namedImport);
-      expect(hitsNamed.length).toBeGreaterThan(0);
-      expect(hitsNamed[0].adapter).toBe(adapter);
-      expect(hitsNamed[0].how).toBe('import');
+  it('detects import and construction of LogiccAdapter and AnymizeAdapter in production sources', () => {
+    const dir = mkdtempSync(path.join(tmpdir(), 'providers-neg-disk-'));
+    try {
+      const srcDir = path.join(dir, 'apps', 'worker', 'src');
+      mkdirSync(srcDir, { recursive: true });
 
-      const multiline = `import {\n  ${adapter},\n} from '@tugpt/ai-providers';`;
-      const hitsMulti = reachesIn(multiline);
-      expect(hitsMulti.length).toBeGreaterThan(0);
-      expect(hitsMulti[0].adapter).toBe(adapter);
+      writeFileSync(
+        path.join(srcDir, 'bad-import.ts'),
+        "import { LogiccAdapter } from '@tugpt/ai-providers';\nexport const x = 1;\n"
+      );
 
-      const aliased = `import { ${adapter} as Fallback } from '@tugpt/ai-providers';`;
-      const hitsAliased = reachesIn(aliased);
-      expect(hitsAliased.length).toBeGreaterThan(0);
-      expect(hitsAliased[0].adapter).toBe(adapter);
+      writeFileSync(
+        path.join(srcDir, 'bad-construction.ts'),
+        "import * as providers from '@tugpt/ai-providers';\nconst a = new providers.AnymizeAdapter({});\n"
+      );
 
-      const construction = `import * as p from '@tugpt/ai-providers';\nconst inst = new p.${adapter}({});`;
-      const hitsConstruct = reachesIn(construction);
-      expect(hitsConstruct.length).toBeGreaterThan(0);
-      expect(hitsConstruct.some((h) => h.how === 'construction')).toBe(true);
+      writeFileSync(
+        path.join(srcDir, 'clean-comment.ts'),
+        "/**\n * LogiccAdapter and AnymizeAdapter are excluded.\n */\nexport const ok = true;\n"
+      );
+
+      const hits = scanCutProviders(dir, {
+        productionRoots: ['apps/worker/src'],
+      });
+
+      expect(hits).toHaveLength(2);
+      expect(hits).toContainEqual({
+        file: 'apps/worker/src/bad-import.ts',
+        adapter: 'LogiccAdapter',
+        how: 'import',
+        line: 1,
+      });
+      expect(hits).toContainEqual({
+        file: 'apps/worker/src/bad-construction.ts',
+        adapter: 'AnymizeAdapter',
+        how: 'construction',
+        line: 2,
+      });
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
     }
   });
+});
 
-  it('does not flag permitted provider files or comments', () => {
-    const explanationComment = [
-      '/**',
-      ' * LogiccAdapter and AnymizeAdapter are intentionally NOT imported here.',
-      ' */',
-      "import { RotatingLangdockAdapter } from '@tugpt/ai-providers';",
-    ].join('\n');
-
-    expect(reachesIn(explanationComment)).toEqual([]);
+describe('path normalization: platform-invariant path separators', () => {
+  it('normalizes Windows backslashes to POSIX forward slashes', () => {
+    expect(normalizePath('apps\\worker\\src\\service.ts')).toBe('apps/worker/src/service.ts');
+    expect(normalizePath('deploy\\staging\\launch-staging.sh')).toBe('deploy/staging/launch-staging.sh');
+    expect(normalizePath('supabase\\migrations\\20260805000013.sql')).toBe('supabase/migrations/20260805000013.sql');
   });
 });

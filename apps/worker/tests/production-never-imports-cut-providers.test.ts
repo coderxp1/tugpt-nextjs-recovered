@@ -49,35 +49,23 @@ import { describe, expect, it } from 'vitest';
 import { existsSync, mkdtempSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
+import {
+  scanCutProviders,
+  reachesInSource,
+  CUT_ADAPTERS as HELPER_CUT_ADAPTERS,
+  DEFAULT_PRODUCTION_ROOTS,
+  DEFAULT_EXEMPT_ROOTS,
+  type ReachRecord,
+} from './helpers/architectural-guards';
 
-const REPO_ROOT = path.join(process.cwd(), '..', '..');
+const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 
 /** The two adapters ADR-006 removed from the production chain. */
-export const CUT_ADAPTERS = ['LogiccAdapter', 'AnymizeAdapter'] as const;
-
-/**
- * Production source trees.
- *
- * This list must cover the `src` directory of every app and every package in
- * the repo, minus the exemptions below — asserted, because the cheapest way to
- * defeat this guard is to quietly shorten the list rather than argue with it.
- */
-export const PRODUCTION_ROOTS = [
-  'apps/worker/src',
-  'apps/web/src',
-  'packages/ai-orchestration/src',
-  'packages/auth/src',
-  'packages/database/src',
-  'packages/feature-flags/src',
-  'packages/jobs/src',
-  'packages/observability/src',
-  'packages/security/src',
-];
-
-/** Not scanned, with the reason. Anything else new must be classified. */
-export const EXEMPT_ROOTS: Record<string, string> = {
-  'packages/ai-providers/src': 'Defines and exports both adapters. That is its job.',
-};
+export const CUT_ADAPTERS = HELPER_CUT_ADAPTERS;
+export const PRODUCTION_ROOTS = DEFAULT_PRODUCTION_ROOTS;
+export const EXEMPT_ROOTS = DEFAULT_EXEMPT_ROOTS;
+export type Reach = ReachRecord;
+export const reachesIn = reachesInSource;
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.next', 'coverage', '.turbo']);
 
@@ -100,63 +88,6 @@ export function productionFilesIn(dir: string): string[] {
   return out;
 }
 
-export interface Reach {
-  file: string;
-  adapter: string;
-  how: 'import' | 'construction';
-  line: number;
-}
-
-/**
- * Ways production code could actually reach a cut adapter.
- *
- * Comments are stripped first. The factory's own comment block names both
- * adapters in order to explain why they are absent — scanning raw text would
- * flag the explanation as the violation, which is the kind of false positive
- * that gets a guard deleted.
- */
-export function reachesIn(source: string, file = '<memory>'): Reach[] {
-  const stripped = source
-    .replace(/\/\*[\s\S]*?\*\//g, (m) => m.replace(/[^\n]/g, ' '))
-    .replace(/\/\/[^\n]*/g, '');
-
-  const found: Reach[] = [];
-  const lines = stripped.split('\n');
-
-  for (const adapter of CUT_ADAPTERS) {
-    // An import naming the class, in any of the shapes TypeScript allows.
-    const imported = new RegExp(`\\bimport\\b[\\s\\S]*?\\b${adapter}\\b[\\s\\S]*?from\\s*['"]`, 'g');
-    for (const m of stripped.matchAll(imported)) {
-      found.push({
-        file,
-        adapter,
-        how: 'import',
-        line: stripped.slice(0, m.index).split('\n').length,
-      });
-    }
-
-    // `new AnymizeAdapter(` and `new providers.AnymizeAdapter(` — the route a
-    // namespace import would take around the check above.
-    lines.forEach((text, i) => {
-      if (new RegExp(`\\bnew\\s+(?:[A-Za-z_$][\\w$]*\\.)*${adapter}\\s*\\(`).test(text)) {
-        found.push({ file, adapter, how: 'construction', line: i + 1 });
-      }
-    });
-  }
-
-  return found;
-}
-
-function scanProduction(): Reach[] {
-  const hits: Reach[] = [];
-  for (const root of PRODUCTION_ROOTS) {
-    for (const file of productionFilesIn(path.join(REPO_ROOT, root))) {
-      hits.push(...reachesIn(readFileSync(file, 'utf8'), path.relative(REPO_ROOT, file)));
-    }
-  }
-  return hits;
-}
-
 describe('production wiring never reaches a cut provider (ADR-006)', () => {
   it('scans a real, non-empty set of files (a cwd change must fail, not pass vacuously)', () => {
     // Both doc guards in this directory resolve paths from process.cwd(). Run
@@ -174,7 +105,7 @@ describe('production wiring never reaches a cut provider (ADR-006)', () => {
   });
 
   it('imports neither LogiccAdapter nor AnymizeAdapter anywhere in production source', () => {
-    const hits = scanProduction();
+    const hits = scanCutProviders(REPO_ROOT);
     const readable = hits.map((h) => `${h.file}:${h.line} ${h.how} of ${h.adapter}`);
 
     // If this fails, the question is not "how do I silence it". Logicc was cut
