@@ -105,8 +105,10 @@ describe('production wiring never reaches a cut provider (ADR-006)', () => {
   });
 
   it('imports neither LogiccAdapter nor AnymizeAdapter anywhere in production source', () => {
-    const hits = scanCutProviders(REPO_ROOT);
-    const readable = hits.map((h) => `${h.file}:${h.line} ${h.how} of ${h.adapter}`);
+    const result = scanCutProviders(REPO_ROOT);
+    expect(result.traversalErrors).toEqual([]);
+    expect(result.scannedFiles.length).toBeGreaterThan(20);
+    const readable = result.violations.map((h) => `${h.file}:${h.line} ${h.how} of ${h.adapter}`);
 
     // If this fails, the question is not "how do I silence it". Logicc was cut
     // on cost and Anymize is isolated from this project on purpose; reversing

@@ -40,10 +40,9 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
-  findSourceFiles,
   scanFeatureFlags,
   FEATURE_FLAG_TABLE,
   FEATURE_FLAG_SQL_READ,
@@ -57,25 +56,17 @@ const ALLOWED_TS = DEFAULT_ALLOWED_TS_FLAGS;
 const ALLOWED_SQL = DEFAULT_ALLOWED_SQL_FLAGS;
 const SQL_READ = FEATURE_FLAG_SQL_READ;
 
-function sourceFiles(roots: string[]): string[] {
-  return findSourceFiles(REPO_ROOT, roots);
-}
-
-function migrationFiles(): string[] {
-  const dir = path.join(REPO_ROOT, 'supabase', 'migrations');
-  return readdirSync(dir)
-    .filter((f) => f.endsWith('.sql'))
-    .sort();
-}
-
 describe('is_feature_enabled is the only reader of feature_flags', () => {
-  it('finds the files it is guarding (a moved tree must fail loudly, not silently pass)', () => {
-    expect(sourceFiles(['apps', 'packages']).length).toBeGreaterThan(50);
-    expect(migrationFiles().length).toBeGreaterThan(30);
+  const result = scanFeatureFlags(REPO_ROOT);
+
+  it('finds the files it is guarding without traversal errors', () => {
+    expect(result.traversalErrors).toEqual([]);
+    expect(result.scannedFiles.filter((f) => f.endsWith('.ts')).length).toBeGreaterThan(50);
+    expect(result.scannedFiles.filter((f) => f.endsWith('.sql')).length).toBeGreaterThan(30);
   });
 
   it('no TypeScript outside the allowlist touches feature_flags', () => {
-    const { tsViolations } = scanFeatureFlags(REPO_ROOT);
+    const { tsViolations } = result;
 
     expect(
       tsViolations,
@@ -90,7 +81,7 @@ describe('is_feature_enabled is the only reader of feature_flags', () => {
   });
 
   it('no migration outside the allowlist reads feature_flags', () => {
-    const { sqlViolations } = scanFeatureFlags(REPO_ROOT);
+    const { sqlViolations } = result;
 
     expect(
       sqlViolations,

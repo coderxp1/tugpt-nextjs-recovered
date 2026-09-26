@@ -37,7 +37,6 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
 import {
   scanFixtureEmails,
@@ -46,43 +45,9 @@ import {
 } from './helpers/architectural-guards';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
-const ROOTS = ['apps', 'packages', 'supabase/tests'];
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.next', '.turbo', '.git', 'coverage']);
 
 export const isReservedEmailDomain = isReservedDomainHelper;
 export const emailsIn = extractEmails;
-
-const EXEMPT = new Set([
-  'apps/worker/tests/fixture-emails-are-reserved.test.ts',
-  'apps/worker/tests/no-dead-domain.test.ts',
-]);
-
-function walk(dir: string, out: string[]): void {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (SKIP_DIRS.has(entry)) continue;
-    const full = path.join(dir, entry);
-    let isDir: boolean;
-    try {
-      isDir = statSync(full).isDirectory();
-    } catch {
-      continue;
-    }
-    if (isDir) walk(full, out);
-    else out.push(path.relative(REPO_ROOT, full).split(path.sep).join('/'));
-  }
-}
-
-function testFiles(): string[] {
-  const out: string[] = [];
-  for (const root of ROOTS) walk(path.join(REPO_ROOT, root), out);
-  return out.filter((f) => /\.test\.(ts|tsx|sql)$/.test(f)).filter((f) => !EXEMPT.has(f));
-}
 
 describe('the extractor', () => {
   it('T1: finds addresses, and only addresses', () => {
@@ -129,18 +94,20 @@ describe('the reserved-domain rule', () => {
 });
 
 describe('every fixture address in the suite', () => {
-  const files = testFiles();
+  const results = scanFixtureEmails(REPO_ROOT);
 
-  it('T6: found the test files it is checking', () => {
+  it('T6: found the test files it is checking without traversal errors', () => {
+    // Assert no traversal errors occurred during scanning
+    expect(results.traversalErrors).toEqual([]);
+
     // A moved root, or a changed test-file convention, must fail here rather
     // than quietly turn this into an assertion about nothing.
-    expect(files.length, 'test file set looks empty — check ROOTS').toBeGreaterThan(20);
-    expect(files.some((f) => f.endsWith('.sql')), 'no pgTAP files found').toBe(true);
+    expect(results.scannedFiles.length, 'test file set looks empty — check ROOTS').toBeGreaterThan(20);
+    expect(results.scannedFiles.some((f) => f.endsWith('.sql')), 'no pgTAP files found').toBe(true);
   });
 
   it('T7: uses a domain reserved by RFC 2606', () => {
-    const results = scanFixtureEmails(REPO_ROOT);
-    const offenders = results.flatMap((r) => r.violations.map((v) => `${r.file}: ${v}`));
+    const offenders = results.violations.flatMap((r) => r.violations.map((v) => `${r.file}: ${v}`));
 
     expect(
       offenders,

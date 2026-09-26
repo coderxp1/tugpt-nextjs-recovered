@@ -70,14 +70,33 @@ TuGPT is preparing for staging rehearsal and cold recovery on a shared GPU host 
    - Shared model reuse from `/srv/ai/models/` is deferred. Any future weight access will be implemented via administrator-configured, read-only container bind mounts of verified checksummed files.
 
 ### 4.3 Privileged Deployment Boundary, Manifest & Network Isolation Policy
-- Deployment is executed exclusively by an authorized administrator using an administrator-owned bundle and dedicated launcher:
-  ```bash
-  # Launch staging stack (executes mandatory preflight before Docker startup)
-  sudo sh /etc/tugpt/staging/launch-staging.sh
-  ```
+- **Administrator Privileged Launcher (`deploy/staging/launch-staging.sh`):**
+  - Staging deployment is executed exclusively by an authorized host administrator using a single root-owned launcher entrypoint:
+    ```bash
+    sudo sh /etc/tugpt/staging/launch-staging.sh
+    ```
+  - **Security Invariants & Boundary Enforcements:**
+    1. **Root UID Enforcement:** Asserts effective UID is `0` (`id -u`); exits 2 immediately if invoked by non-root users.
+    2. **Fixed Canonical Path:** Binds strictly to `/etc/tugpt/staging/` with no parameter overrides or custom bundle paths.
+    3. **Root Ownership:** Verifies `root:root` (`0:0`) ownership on the staging directory and all bundle components (`docker-compose.yml`, `staging.env`, `release-manifest.json`, `check-staging-env.sh`).
+    4. **Parent Directory Trust:** Asserts trusted root ownership (`0:0`) and non-world-writable modes (`0755` or stricter) on parent directories `/etc` and `/etc/tugpt`.
+    5. **Exact Permissions:** Enforces mode `0700` on the deployment directory and executable scripts, and mode `0600` on configuration, compose, and manifest files.
+    6. **Symlink Rejection:** Traverses and checks all bundle paths; any symlink is rejected as an insecure link attack vector.
+    7. **Clean Environment (`env -i`):** Sanitizes execution environment (`env -i PATH=... HOME=/root`) to prevent ambient shell contamination.
+    8. **Isolated Compose Invocation:** Passes `--env-file /dev/null` to Docker Compose to ensure only explicitly declared environment variables from `staging.env` reach containers.
+    9. **Mandatory Preflight Abort:** Contact with the Docker daemon is strictly prohibited until preflight validation passes completely.
+
+- **Release Approval Manifest & Preflight Enforcement (`deploy/staging/check-staging-env.sh`):**
+  - **Mandatory Administrator Manifest:** Deployment requires an approved release manifest (`release-manifest.json`) adhering to JSON Schema v1.0.0.
+  - **Schema Validation:** Verifies schema version `1.0.0`, approved repository (`ghcr.io/coderxp1/tugpt-web`), exact 64-hex lowercase `@sha256:` digest, 40-hex commit SHA, positive HTTPS Supabase URL, and non-empty anonymous key.
+  - **Strict Web-Only Allowlist:** Only documented runtime keys are permitted (`TUGPT_ENVIRONMENT`, `TUGPT_WEB_STAGING_IMAGE`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and optional `NODE_ENV`, `PORT`). Unknown keys are rejected.
+  - **Platform Secret Protection:** Rejects all `TUGPT_SECRET_KEY_*` variables in `staging.env` and ambient shell process space.
+  - **Syntax Hardening:** Rejects shell command substitutions (`$(...)`, backticks, `&&`, `||`, `;`) and variable interpolation (`$VAR`, `${VAR}`).
+  - **Credential Redaction:** Errors redact credentials and sensitive tokens.
+
 - Individual stack lifecycle operations are separated:
   ```bash
-  # Start staging stack directly
+  # Start staging stack directly (after verified launcher execution)
   docker compose -p tugpt-staging -f /etc/tugpt/staging/docker-compose.yml up -d
 
   # Stop staging containers (preserves container state and networks)
@@ -97,7 +116,7 @@ TuGPT is preparing for staging rehearsal and cold recovery on a shared GPU host 
   - The `web` service runs attached strictly to an isolated Docker bridge network (`tugpt_staging_net`). Host networking (`network_mode: host`) is strictly prohibited.
   - **Loopback Isolation:** The loopback address `127.0.0.1` inside the container refers strictly to the container's private network namespace. Requests from inside the container to `127.0.0.1:8188` (ComfyUI) or `127.0.0.1:3001` (production) fail with connection refused, isolating host loopback services.
   - **Port Publishing:** Staging web publishes port `3002:3000` bound strictly to host loopback `127.0.0.1:3002`. Public exposure on `0.0.0.0` is prevented.
-  - **Outbound Traffic:** Container outbound traffic to external staging infrastructure (e.g. `https://staging.example.supabase.co`) routes through the Docker bridge gateway and host NAT, while host loopback services remain unreachable.
+  - **Outbound Traffic:** Container outbound traffic to external staging infrastructure (e.g. `https://test-fixture-staging.supabase.co`) routes through the Docker bridge gateway and host NAT, while host loopback services remain unreachable.
 
 ### 4.4 Resource Governance & Cgroup Quotas
 All TuGPT services in Docker Compose must define strict resource limits to protect host stability:
@@ -139,6 +158,7 @@ All TuGPT services in Docker Compose must define strict resource limits to prote
 - Staging preflight validation mechanically enforces project isolation and prevents production credential leakage.
 - Production queues and database are completely protected from rehearsal interference.
 - Container execution runs as unprivileged user (`nextjs:nodejs`, UID 1001) with all Linux capabilities dropped (`cap_drop: [ALL]`).
+- CI integration smoke gate verifies runtime container isolation and cross-tenant authorization on disposable runners before deployment.
 
 ### Negative / Trade-offs & Shared-Host Residual Risks
 - Administrator mediation is required for privileged deployment and staging container lifecycles.
@@ -156,13 +176,14 @@ Verification items are classified into verified off-host gates and deferred host
 
 | Item | Scope | Status | Evidence / Notes |
 | :--- | :--- | :--- | :--- |
-| TypeScript Typecheck | Off-Host | **VERIFIED** | `turbo typecheck` passes 18/18 packages (exit code 0). |
-| Unit & Integration Tests | Off-Host | **VERIFIED** | Vitest passes all 27 worker suites (463 tests) and 23 web suites (386 tests). |
-| Staging Manifest Invariants | Off-Host | **VERIFIED** | `staging-deployment-preflight.test.ts` asserts runtime-only, loopback 3002, cap_drop ALL, no GPU. |
-| Negative Controls Suite | Off-Host | **VERIFIED** | `path-normalization-negative-controls.test.ts` asserts all 5 architectural guards fail on violating fixtures. |
-| Preflight Script Validation | Off-Host | **VERIFIED** | `deploy/staging/check-staging-env.sh` verified against valid and violating synthetic fixtures. |
-| Docker Web Image Build | Off-Host | **VERIFIED** | `tugpt-web:staging-test` built cleanly via `apps/web/Dockerfile`. |
-| Docker Worker Image Build | Off-Host | **VERIFIED** | `tugpt-worker:staging-test` built cleanly via `apps/worker/Dockerfile`. |
+| TypeScript Typecheck | Off-Host | **VERIFIED** | `pnpm typecheck` passes all monorepo packages cleanly. |
+| Monorepo Linting | Off-Host | **VERIFIED** | `pnpm lint` passes with zero lint errors. |
+| Unit Test Suite | Off-Host | **VERIFIED** | `pnpm --filter @tugpt/worker test` passes 27/27 suites (448 tests) with zero Docker/DB dependencies. |
+| Preflight & Launcher Bounds | Off-Host | **VERIFIED** | `staging-deployment-preflight.test.ts` passes 30/30 tests (schema v1.0.0, allowlists, root UID 0, symlink/perm checks). |
+| Architectural Guards & Inventory | Off-Host | **VERIFIED** | All 5 scanners track `scannedFiles` inventories and record `traversalErrors`; negative controls pass 6/6. |
+| Staging Integration Smoke | Off-Host | **VERIFIED** | `pnpm --filter @tugpt/worker test:integration` passes 6/6 tests (real HTTP routes, tenant denial, limits, loopback). |
+| Docker Web Image Build | Off-Host | **VERIFIED** | `tugpt-web:staging-test` built cleanly via `apps/web/Dockerfile` with pinned `@sha256:` digest. |
+| CI Staging Smoke Workflow Gate | Off-Host | **VERIFIED** | `staging-integration-smoke` job added to `.github/workflows/ci.yml` with unconditional teardown. |
 | Developer Host Shell (`tugpt-dev`) | On-Host | **DEFERRED** | Direct developer shell access deferred; staging rehearsal operated by host administrator. |
 | Host Loopback Firewall Filtering | On-Host | **NOT YET VERIFIED** | Deferred pending host administrator execution. |
 | Live ComfyUI Non-Interference | On-Host | **NOT YET VERIFIED** | Deferred pending host staging deployment. |

@@ -172,3 +172,50 @@ jobs:
       # evidence that it runs.
       - name: Boot both workers from the built image
         run: sh .github/scripts/worker-boot-check.sh tugpt-worker:ci
+
+  # Staging integration smoke test gate (Finding 3 & 5 from ADR-018 review).
+  # Runs the disposable integration test suite against the candidate web image
+  # started via the reviewed Compose deployment path (docker-compose.staging.yml).
+  # Validates runtime limits, loopback isolation, and cross-tenant authorization boundaries.
+  staging-integration-smoke:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
+        with:
+          node-version: 22.12.0
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: 10.34.5
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Build candidate web image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          load: true
+          tags: tugpt-web:staging-test
+          build-args: |
+            NEXT_PUBLIC_SUPABASE_URL=https://test-fixture-staging.supabase.co
+            NEXT_PUBLIC_SUPABASE_ANON_KEY=test-anon-token-xyz
+
+      - name: Run staging integration smoke suite
+        run: pnpm --filter @tugpt/worker test:integration
+        env:
+          TUGPT_WEB_STAGING_IMAGE: tugpt-web:staging-test
+
+      - name: Teardown disposable resources
+        if: always()
+        run: |
+          docker compose -p tugpt-staging-smoke -f docker-compose.staging.yml down --volumes --remove-orphans || true
+

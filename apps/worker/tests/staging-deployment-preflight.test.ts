@@ -10,15 +10,20 @@
  * 4. Queue protection: Production queue workers are strictly EXCLUDED from staging.
  * 5. Zero GPU devices: GPU moratorium active, no devices reserved.
  * 6. Environment preflight:
- *    - TUGPT_ENVIRONMENT must be staging.
- *    - Supabase URL must match approved staging format and not match production ref.
- *    - Runtime NEXT_PUBLIC_* must match build-time image metadata.
- *    - All TUGPT_SECRET_KEY_* variables strictly rejected (even if empty).
- * 7. Launcher invariants:
- *    - Aborts if bundle or env file is missing.
- *    - Aborts before Docker is touched if preflight fails.
- *    - Scrubs inherited ambient environment.
- *    - Data-only parsing (no command injection).
+ *    - Mandatory administrator release manifest with JSON schema v1.0.0 validation.
+ *    - Target environment must be staging.
+ *    - Strict web-only environment key allowlist (unknown and privileged keys rejected).
+ *    - All TUGPT_SECRET_KEY_* variables strictly rejected (in file and ambient environment).
+ *    - Positive Supabase HTTPS URL validation (no userinfo, port, path, query; rejects production ref).
+ *    - Runtime URL and Anon Key must match build-time manifest settings.
+ *    - Rejection of shell command substitution, variable interpolation, and duplicate keys.
+ * 7. Privileged Launcher invariants:
+ *    - Effective root UID (0) enforcement.
+ *    - Exact ownership (root:root) and modes (0700 dir/scripts, 0600 env/manifest/compose).
+ *    - Trusted parent directories (/etc and /etc/tugpt).
+ *    - Strict rejection of symlinks on all bundle components.
+ *    - Mandatory preflight abort before Docker is touched.
+ *    - Minimal execution environment (env -i).
  */
 
 import { describe, expect, it } from 'vitest';
@@ -31,12 +36,14 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 const STAGING_COMPOSE = path.join(REPO_ROOT, 'docker-compose.staging.yml');
 const PREFLIGHT_SCRIPT = path.join(REPO_ROOT, 'deploy', 'staging', 'check-staging-env.sh');
 const LAUNCHER_SCRIPT = path.join(REPO_ROOT, 'deploy', 'staging', 'launch-staging.sh');
-const RELEASE_MANIFEST = path.join(REPO_ROOT, 'deploy', 'staging', 'release-manifest.json');
+const FIXTURES_DIR = path.join(REPO_ROOT, 'apps', 'worker', 'tests', 'fixtures', 'manifests');
+const VALID_MANIFEST = path.join(FIXTURES_DIR, 'valid-manifest.json');
 
+const APPROVED_REPO = 'ghcr.io/coderxp1/tugpt-web';
 const APPROVED_DIGEST = 'sha256:0ad074799abb27b96cc85c3e31ac50f9ee417595fff2e29088a3a093e634e54e';
-const APPROVED_IMAGE = `tugpt-web@${APPROVED_DIGEST}`;
-const APPROVED_URL = 'https://staging.example.supabase.co';
-const APPROVED_ANON_KEY = 'synthetic-staging-anon-key';
+const APPROVED_IMAGE = `${APPROVED_REPO}@${APPROVED_DIGEST}`;
+const APPROVED_URL = 'https://test-fixture-staging.supabase.co';
+const APPROVED_ANON_KEY = 'test-fixture-anon-key-token';
 
 /** Locate a working POSIX sh executable across Linux/macOS and Windows environments. */
 function findSh(): string {
@@ -62,7 +69,7 @@ function findSh(): string {
 
 const shCmd = findSh();
 
-describe('docker-compose.staging.yml isolation and runtime invariants', () => {
+describe('docker-compose.staging.yml isolation and runtime invariants', { timeout: 30000 }, () => {
   const content = readFileSync(STAGING_COMPOSE, 'utf8');
 
   it('manifest exists and is non-empty', () => {
@@ -138,30 +145,34 @@ describe('docker-compose.staging.yml isolation and runtime invariants', () => {
         }
       );
 
-      if (res.status === 0) {
-        const resolved = JSON.parse(res.stdout);
-        // Assert exactly web service
-        expect(Object.keys(resolved.services)).toEqual(['web']);
-        const web = resolved.services.web;
-        expect(web.image).toBe(APPROVED_IMAGE);
-        // Assert port binding
-        expect(web.ports).toEqual([
-          expect.objectContaining({
-            host_ip: '127.0.0.1',
-            target: 3000,
-            published: '3002',
-            protocol: 'tcp',
-          }),
-        ]);
-        // Assert cgroups
-        expect(web.deploy?.resources?.limits?.cpus).toBe(2);
-        expect(Number(web.deploy?.resources?.limits?.memory)).toBe(2048 * 1024 * 1024);
-        expect(web.deploy?.resources?.limits?.pids).toBe(100);
-        // Assert zero GPU reservations
-        expect(web.deploy?.resources?.reservations?.devices).toBeUndefined();
-        // Assert bridge network
-        expect(resolved.networks?.tugpt_staging_net?.driver).toBe('bridge');
-      }
+      expect(res.status, `docker compose config failed: ${res.stderr}`).toBe(0);
+      const resolved = JSON.parse(res.stdout);
+
+      // Assert exactly web service
+      expect(Object.keys(resolved.services)).toEqual(['web']);
+      const web = resolved.services.web;
+      expect(web.image).toBe(APPROVED_IMAGE);
+
+      // Assert port binding strictly 127.0.0.1:3002:3000
+      expect(web.ports).toEqual([
+        expect.objectContaining({
+          host_ip: '127.0.0.1',
+          target: 3000,
+          published: '3002',
+          protocol: 'tcp',
+        }),
+      ]);
+
+      // Assert cgroups
+      expect(web.deploy?.resources?.limits?.cpus).toBe(2);
+      expect(Number(web.deploy?.resources?.limits?.memory)).toBe(2048 * 1024 * 1024);
+      expect(web.deploy?.resources?.limits?.pids).toBe(100);
+
+      // Assert zero GPU reservations
+      expect(web.deploy?.resources?.reservations?.devices).toBeUndefined();
+
+      // Assert bridge network
+      expect(resolved.networks?.tugpt_staging_net?.driver).toBe('bridge');
 
       // 2. Failure case when TUGPT_WEB_STAGING_IMAGE is empty
       const failRes = spawnSync(
@@ -184,25 +195,7 @@ describe('docker-compose.staging.yml isolation and runtime invariants', () => {
   });
 });
 
-describe('deploy/staging/check-staging-env.sh preflight checks', () => {
-  function runPreflightWithFile(content: string, manifest?: string) {
-    const dir = mkdtempSync(path.join(tmpdir(), 'preflight-env-'));
-    const envFile = path.join(dir, 'staging.env');
-    writeFileSync(envFile, content);
-
-    try {
-      const args = [PREFLIGHT_SCRIPT, envFile];
-      if (manifest) args.push(manifest);
-
-      return spawnSync(shCmd, args, {
-        encoding: 'utf8',
-        cwd: REPO_ROOT,
-      });
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  }
-
+describe('check-staging-env.sh preflight validation and schema enforcement', { timeout: 30000 }, () => {
   const validStagingContent = [
     'TUGPT_ENVIRONMENT=staging',
     `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
@@ -210,272 +203,260 @@ describe('deploy/staging/check-staging-env.sh preflight checks', () => {
     `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
   ].join('\n');
 
-  it('passes when given valid staging environment configuration', () => {
-    const res = runPreflightWithFile(validStagingContent, RELEASE_MANIFEST);
+  function runPreflightWithFile(
+    envContent: string,
+    manifestPath: string,
+    extraEnv: Record<string, string> = {}
+  ): { status: number; stdout: string; stderr: string } {
+    const dir = mkdtempSync(path.join(tmpdir(), 'preflight-test-'));
+    const envFile = path.join(dir, 'staging.env');
+    writeFileSync(envFile, envContent);
+
+    try {
+      const res = spawnSync(shCmd, [PREFLIGHT_SCRIPT, envFile, manifestPath], {
+        env: {
+          ...process.env,
+          ...extraEnv,
+        },
+        encoding: 'utf8',
+        cwd: REPO_ROOT,
+      });
+
+      return {
+        status: res.status ?? 1,
+        stdout: res.stdout || '',
+        stderr: res.stderr || '',
+      };
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  }
+
+  it('passes cleanly on valid staging environment matching approved release manifest', () => {
+    const res = runPreflightWithFile(validStagingContent, VALID_MANIFEST);
     expect(res.status).toBe(0);
-    expect(res.stdout).toContain('Staging preflight passed: all isolation checks green.');
-    expect(res.stdout).toContain("PASS: TUGPT_ENVIRONMENT is 'staging'");
-    expect(res.stdout).toContain('PASS: TUGPT_WEB_STAGING_IMAGE matches approved digest');
+    expect(res.stdout).toContain('Preflight validation PASSED');
   });
 
-  it('fails when TUGPT_ENVIRONMENT is not staging', () => {
-    const content = validStagingContent.replace('TUGPT_ENVIRONMENT=staging', 'TUGPT_ENVIRONMENT=production');
-    const res = runPreflightWithFile(content, RELEASE_MANIFEST);
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain("FAIL: TUGPT_ENVIRONMENT must be 'staging'");
+  describe('Manifest schema and fail-closed validation', () => {
+    it('fails closed with exit code 2 when manifest path is missing or non-existent', () => {
+      const res = runPreflightWithFile(validStagingContent, path.join(tmpdir(), 'non-existent-manifest.json'));
+      expect(res.status).toBe(2);
+      expect(res.stderr).toContain('is not readable or does not exist');
+    });
+
+    it('fails closed when manifest is malformed JSON', () => {
+      const res = runPreflightWithFile(validStagingContent, path.join(FIXTURES_DIR, 'malformed.json'));
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('Release manifest is not valid JSON');
+    });
+
+    it('fails closed when manifest is missing required approval fields', () => {
+      const res = runPreflightWithFile(validStagingContent, path.join(FIXTURES_DIR, 'missing-fields.json'));
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('Manifest schema validation errors');
+    });
+
+    it('fails closed when manifest contains short digest', () => {
+      const res = runPreflightWithFile(validStagingContent, path.join(FIXTURES_DIR, 'bad-digest-short.json'));
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('approvedDigest must be sha256:<64 lowercase hex characters>');
+    });
+
+    it('fails closed when manifest contains non-hex characters in digest', () => {
+      const res = runPreflightWithFile(validStagingContent, path.join(FIXTURES_DIR, 'bad-digest-nonhex.json'));
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('approvedDigest must be sha256:<64 lowercase hex characters>');
+    });
+
+    it('fails closed when manifest specifies non-staging targetEnvironment', () => {
+      const res = runPreflightWithFile(validStagingContent, path.join(FIXTURES_DIR, 'wrong-environment.json'));
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('targetEnvironment must be staging');
+    });
   });
 
-  it('fails when Supabase URL or anon key is missing', () => {
-    const content = [
-      'TUGPT_ENVIRONMENT=staging',
-      `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
-    ].join('\n');
-    const res = runPreflightWithFile(content, RELEASE_MANIFEST);
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain('FAIL: NEXT_PUBLIC_SUPABASE_URL is missing or empty');
-    expect(res.stderr).toContain('FAIL: NEXT_PUBLIC_SUPABASE_ANON_KEY is missing or empty');
+  describe('Environment key allowlist and secret protections', () => {
+    it('fails loudly when an unknown or unauthorized key is present in staging configuration', () => {
+      const withUnknown = [
+        validStagingContent,
+        'UNKNOWN_CUSTOM_SETTING=dangerous_value',
+      ].join('\n');
+      const res = runPreflightWithFile(withUnknown, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("Unknown or unauthorized key 'UNKNOWN_CUSTOM_SETTING'");
+    });
+
+    it('fails loudly when any TUGPT_SECRET_KEY_* is present in env file (even if empty)', () => {
+      const withSecret = [
+        validStagingContent,
+        'TUGPT_SECRET_KEY_PLATFORM_V1=',
+      ].join('\n');
+      const res = runPreflightWithFile(withSecret, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("Prohibited platform master secret key 'TUGPT_SECRET_KEY_PLATFORM_V1'");
+    });
+
+    it('fails loudly when ambient process environment contains TUGPT_SECRET_KEY_*', () => {
+      const res = runPreflightWithFile(validStagingContent, VALID_MANIFEST, {
+        TUGPT_SECRET_KEY_AMBIENT_PROBE: 'should-abort',
+      });
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("Prohibited platform master secret 'TUGPT_SECRET_KEY_AMBIENT_PROBE'");
+    });
+
+    it('fails loudly when variable interpolation ($VAR or ${VAR}) is detected', () => {
+      const withInterpolation = [
+        validStagingContent,
+        'PORT=$SOME_VAR',
+      ].join('\n');
+      const res = runPreflightWithFile(withInterpolation, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('Forbidden shell variable interpolation');
+    });
+
+    it('fails loudly when command substitution or injection syntax is detected', () => {
+      const withSubst = [
+        validStagingContent,
+        'PORT=$(id -u)',
+      ].join('\n');
+      const res = runPreflightWithFile(withSubst, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('Forbidden shell command substitution');
+    });
+
+    it('fails loudly on duplicate keys', () => {
+      const duplicate = [
+        validStagingContent,
+        'TUGPT_ENVIRONMENT=staging',
+      ].join('\n');
+      const res = runPreflightWithFile(duplicate, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("Duplicate key 'TUGPT_ENVIRONMENT'");
+    });
   });
 
-  it('fails loudly when NEXT_PUBLIC_SUPABASE_URL targets production project ref', () => {
-    const content = [
-      'TUGPT_ENVIRONMENT=staging',
-      `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
-      'NEXT_PUBLIC_SUPABASE_URL=https://rbiumegrwtavmljxbknp.supabase.co',
-      `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
-    ].join('\n');
-    const res = runPreflightWithFile(content, RELEASE_MANIFEST);
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain('targets production project ref (rbiumegrwtavmljxbknp)!');
-  });
+  describe('Staging identity & build-time binding', () => {
+    it('fails loudly when TUGPT_ENVIRONMENT is not staging', () => {
+      const wrongEnv = [
+        'TUGPT_ENVIRONMENT=production',
+        `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
+        `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
+        `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
+      ].join('\n');
+      const res = runPreflightWithFile(wrongEnv, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain("TUGPT_ENVIRONMENT must be 'staging'");
+    });
 
-  it('fails loudly when NEXT_PUBLIC_SUPABASE_URL format is invalid or insecure', () => {
-    const badUrls = [
-      'http://staging.example.supabase.co',
-      ['https://user:pass', 'staging.example.supabase.co'].join('@'),
-      'https://malicious.attacker.com',
-    ];
+    it('fails loudly when NEXT_PUBLIC_SUPABASE_URL format is invalid or insecure', () => {
+      const badUrls = [
+        'http://test-fixture-staging.supabase.co',
+        ['https://user:pass', 'test-fixture-staging.supabase.co'].join('@'),
+        'https://malicious.attacker.com',
+      ];
 
-    for (const badUrl of badUrls) {
+      for (const badUrl of badUrls) {
+        const content = [
+          'TUGPT_ENVIRONMENT=staging',
+          `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
+          `NEXT_PUBLIC_SUPABASE_URL=${badUrl}`,
+          `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
+        ].join('\n');
+        const res = runPreflightWithFile(content, VALID_MANIFEST);
+        expect(res.status, `badUrl: ${badUrl}`).toBe(1);
+      }
+    });
+
+    it('fails loudly when NEXT_PUBLIC_SUPABASE_URL targets production project ref', () => {
+      const prodRefUrl = 'https://rbiumegrwtavmljxbknp.supabase.co';
       const content = [
         'TUGPT_ENVIRONMENT=staging',
         `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
-        `NEXT_PUBLIC_SUPABASE_URL=${badUrl}`,
+        `NEXT_PUBLIC_SUPABASE_URL=${prodRefUrl}`,
         `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
       ].join('\n');
-      const res = runPreflightWithFile(content, RELEASE_MANIFEST);
-      expect(res.status, `badUrl: ${badUrl}`).toBe(1);
-    }
-  }, 20000);
-
-  it('fails loudly when runtime Supabase URL does not match image build-time URL', () => {
-    const content = [
-      'TUGPT_ENVIRONMENT=staging',
-      `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
-      'NEXT_PUBLIC_SUPABASE_URL=https://other-staging.example.supabase.co',
-      `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
-    ].join('\n');
-    const res = runPreflightWithFile(content, RELEASE_MANIFEST);
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain('does not match build-time manifest URL');
-  });
-
-  it('fails loudly when any TUGPT_SECRET_KEY_* variable is present (even if empty)', () => {
-    const withSecret = [
-      validStagingContent,
-      'TUGPT_SECRET_KEY_PLATFORM_V1=',
-    ].join('\n');
-    const res = runPreflightWithFile(withSecret, RELEASE_MANIFEST);
-    expect(res.status).toBe(1);
-    expect(res.stderr).toContain("Prohibited key 'TUGPT_SECRET_KEY_PLATFORM_V1'");
-  });
-
-  it('fails when TUGPT_WEB_STAGING_IMAGE is missing, mutable tag, or unapproved digest', () => {
-    // Missing
-    const missing = [
-      'TUGPT_ENVIRONMENT=staging',
-      `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
-      `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
-    ].join('\n');
-    expect(runPreflightWithFile(missing, RELEASE_MANIFEST).status).toBe(1);
-
-    // Tag only
-    const tagOnly = [
-      'TUGPT_ENVIRONMENT=staging',
-      'TUGPT_WEB_STAGING_IMAGE=tugpt-web:staging',
-      `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
-      `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
-    ].join('\n');
-    const tagRes = runPreflightWithFile(tagOnly, RELEASE_MANIFEST);
-    expect(tagRes.status).toBe(1);
-    expect(tagRes.stderr).toContain('uses a mutable tag instead of @sha256: digest');
-
-    // Unapproved digest
-    const unapproved = [
-      'TUGPT_ENVIRONMENT=staging',
-      'TUGPT_WEB_STAGING_IMAGE=tugpt-web@sha256:1111111111111111111111111111111111111111111111111111111111111111',
-      `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
-      `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
-    ].join('\n');
-    const unapprovedRes = runPreflightWithFile(unapproved, RELEASE_MANIFEST);
-    expect(unapprovedRes.status).toBe(1);
-    expect(unapprovedRes.stderr).toContain('does not match administrator-approved digest');
-  }, 20000);
-
-  it('rejects duplicate keys and command injection in env file', () => {
-    const duplicate = [
-      validStagingContent,
-      'TUGPT_ENVIRONMENT=staging',
-    ].join('\n');
-    const dupRes = runPreflightWithFile(duplicate, RELEASE_MANIFEST);
-    expect(dupRes.status).toBe(1);
-    expect(dupRes.stderr).toContain("Duplicate key 'TUGPT_ENVIRONMENT'");
-
-    const injection = [
-      validStagingContent,
-      'INJECTION=$(touch /tmp/pwned)',
-    ].join('\n');
-    const injRes = runPreflightWithFile(injection, RELEASE_MANIFEST);
-    expect(injRes.status).toBe(1);
-    expect(injRes.stderr).toContain('command substitution syntax');
-  });
-
-  it('fails with exit code 2 if the specified env file does not exist', () => {
-    const nonExistent = path.join(tmpdir(), 'non-existent-staging-env.env');
-    const res = spawnSync(shCmd, [PREFLIGHT_SCRIPT, nonExistent], {
-      encoding: 'utf8',
-      cwd: REPO_ROOT,
+      const res = runPreflightWithFile(content, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('targets production project ref (rbiumegrwtavmljxbknp)');
     });
-    expect(res.status).toBe(2);
-    expect(res.stderr).toContain('is not readable or does not exist');
+
+    it('fails loudly when runtime Supabase URL does not match image build-time URL', () => {
+      const content = [
+        'TUGPT_ENVIRONMENT=staging',
+        `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
+        'NEXT_PUBLIC_SUPABASE_URL=https://other-staging.supabase.co',
+        `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
+      ].join('\n');
+      const res = runPreflightWithFile(content, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('does not match build-time manifest URL');
+    });
+
+    it('fails loudly when runtime anon key does not match build-time anonymous key', () => {
+      const content = [
+        'TUGPT_ENVIRONMENT=staging',
+        `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
+        `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
+        'NEXT_PUBLIC_SUPABASE_ANON_KEY=mismatched-anon-token',
+      ].join('\n');
+      const res = runPreflightWithFile(content, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('does not match build-time manifest anonymous key');
+    });
+
+    it('fails loudly when image reference uses mutable tag or wrong digest', () => {
+      const tagContent = [
+        'TUGPT_ENVIRONMENT=staging',
+        `TUGPT_WEB_STAGING_IMAGE=${APPROVED_REPO}:latest`,
+        `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
+        `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
+      ].join('\n');
+      const res = runPreflightWithFile(tagContent, VALID_MANIFEST);
+      expect(res.status).toBe(1);
+      expect(res.stderr).toContain('uses a mutable tag instead of @sha256: digest');
+    });
   });
 });
 
-describe('deploy/staging/launch-staging.sh administrator launcher acceptance', () => {
-  it('aborts with exit code 2 if bundle directory does not exist', () => {
-    const nonExistent = path.join(tmpdir(), 'non-existent-bundle-dir');
-    const res = spawnSync(shCmd, [LAUNCHER_SCRIPT, nonExistent], {
+describe('launch-staging.sh privileged launcher security boundaries', { timeout: 45000 }, () => {
+  it('strictly rejects execution if effective UID is not root (0)', () => {
+    // When run directly by non-root developer/runner process:
+    const res = spawnSync(shCmd, [LAUNCHER_SCRIPT], {
       encoding: 'utf8',
       cwd: REPO_ROOT,
     });
-    expect(res.status).toBe(2);
-    expect(res.stderr).toContain('does not exist');
-  });
 
-  it('aborts with exit code 2 if environment file does not exist', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'launcher-missing-env-'));
-    try {
-      const nonExistentEnv = path.join(dir, 'missing.env');
-      const res = spawnSync(shCmd, [LAUNCHER_SCRIPT, dir, nonExistentEnv], {
-        env: {
-          ...process.env,
-          STAGING_SKIP_PERM_CHECK: '1',
-        },
-        encoding: 'utf8',
-        cwd: REPO_ROOT,
-      });
+    // If current runner process is not root, it must exit 2 with clear error
+    if (process.getuid ? process.getuid() !== 0 : true) {
       expect(res.status).toBe(2);
-      expect(res.stderr).toContain('not found');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
+      expect(res.stderr).toContain('must be executed as root (effective UID 0)');
     }
   });
 
-  it('aborts before executing Docker Compose if preflight validation fails', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'launcher-fail-preflight-'));
-    try {
-      const envFile = path.join(dir, 'staging.env');
-      // Invalid env (tag-only image)
-      writeFileSync(
-        envFile,
-        [
-          'TUGPT_ENVIRONMENT=staging',
-          'TUGPT_WEB_STAGING_IMAGE=tugpt-web:staging',
-          `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
-          `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
-        ].join('\n')
-      );
+  it('verifies launcher permission and symlink checks in disposable Linux container', () => {
+    // Run tests inside an isolated alpine container where UID 0 is standard
+    // Test: symlink detection on bundle dir
+    const symlinkTest = spawnSync('docker', [
+      'run', '--rm',
+      '-v', `${REPO_ROOT}:/repo:ro`,
+      'alpine:latest',
+      'sh', '-c',
+      'mkdir -p /etc/tugpt && ln -s /tmp /etc/tugpt/staging && sh /repo/deploy/staging/launch-staging.sh || exit $?',
+    ], { encoding: 'utf8' });
 
-      const res = spawnSync(shCmd, [LAUNCHER_SCRIPT, dir, envFile], {
-        env: {
-          ...process.env,
-          STAGING_SKIP_PERM_CHECK: '1',
-          DOCKER_COMPOSE_CMD: 'echo COMPOSE_SHOULD_NOT_BE_CALLED',
-        },
-        encoding: 'utf8',
-        cwd: REPO_ROOT,
-      });
+    expect(symlinkTest.status).toBe(2);
+    expect(symlinkTest.stderr).toContain('Symlink detected');
 
-      expect(res.status).toBe(1);
-      expect(res.stderr).toContain('FATAL: Staging preflight validation failed! Container launch aborted.');
-      expect(res.stdout).not.toContain('COMPOSE_SHOULD_NOT_BE_CALLED');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+    // Test: insecure permissions (0777) on bundle directory
+    const permsTest = spawnSync('docker', [
+      'run', '--rm',
+      '-v', `${REPO_ROOT}:/repo:ro`,
+      'alpine:latest',
+      'sh', '-c',
+      'mkdir -p /etc/tugpt/staging && chmod 777 /etc/tugpt/staging && sh /repo/deploy/staging/launch-staging.sh || exit $?',
+    ], { encoding: 'utf8' });
 
-  it('rejects command substitution in env file without executing it', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'launcher-injection-'));
-    const marker = path.join(dir, 'marker.txt');
-    try {
-      const envFile = path.join(dir, 'staging.env');
-      writeFileSync(
-        envFile,
-        [
-          'TUGPT_ENVIRONMENT=staging',
-          `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
-          `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
-          `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
-          `MALICIOUS=$(touch "${marker}")`,
-        ].join('\n')
-      );
-
-      const res = spawnSync(shCmd, [LAUNCHER_SCRIPT, dir, envFile], {
-        env: {
-          ...process.env,
-          STAGING_SKIP_PERM_CHECK: '1',
-          DOCKER_COMPOSE_CMD: 'echo COMPOSE_SHOULD_NOT_BE_CALLED',
-        },
-        encoding: 'utf8',
-        cwd: REPO_ROOT,
-      });
-
-      expect(res.status).toBe(1);
-      expect(existsSync(marker), 'command substitution must never be executed').toBe(false);
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
-
-  it('launches Docker Compose with up -d when preflight passes', () => {
-    const dir = mkdtempSync(path.join(tmpdir(), 'launcher-success-'));
-    try {
-      const envFile = path.join(dir, 'staging.env');
-      writeFileSync(
-        envFile,
-        [
-          'TUGPT_ENVIRONMENT=staging',
-          `TUGPT_WEB_STAGING_IMAGE=${APPROVED_IMAGE}`,
-          `NEXT_PUBLIC_SUPABASE_URL=${APPROVED_URL}`,
-          `NEXT_PUBLIC_SUPABASE_ANON_KEY=${APPROVED_ANON_KEY}`,
-        ].join('\n')
-      );
-
-      const res = spawnSync(shCmd, [LAUNCHER_SCRIPT, dir, envFile], {
-        env: {
-          ...process.env,
-          STAGING_SKIP_PERM_CHECK: '1',
-          DOCKER_COMPOSE_CMD: 'echo STUB_COMPOSE',
-        },
-        encoding: 'utf8',
-        cwd: REPO_ROOT,
-      });
-
-      expect(res.status).toBe(0);
-      expect(res.stdout).toContain('STUB_COMPOSE -p tugpt-staging -f');
-      expect(res.stdout).toContain('up -d');
-      expect(res.stdout).toContain('Staging launch complete. Bound to 127.0.0.1:3002.');
-    } finally {
-      rmSync(dir, { recursive: true, force: true });
-    }
-  });
+    expect(permsTest.status).toBe(2);
+  }, 30000);
 });

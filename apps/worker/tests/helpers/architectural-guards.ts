@@ -1,7 +1,8 @@
 /**
  * @file architectural-guards.ts
  * @description Shared, non-test scanner helpers implementing repository traversal,
- * path-separator normalization, and allowlist validation for architectural invariants.
+ * path-separator normalization, scanned-file inventory, explicit traversal error tracking,
+ * and allowlist validation for architectural invariants.
  *
  * Used by both the primary test guards and the negative control test suites.
  */
@@ -21,6 +22,11 @@ const SKIP_DIRS = new Set([
 /** Normalize relative filesystem paths to POSIX forward slashes. */
 export function normalizePath(rel: string): string {
   return rel.split(path.sep).join('/');
+}
+
+export interface TraversalError {
+  path: string;
+  error: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -55,13 +61,22 @@ export const DEFAULT_ALLOWED_SQL_FLAGS = new Map<string, string>([
   ],
 ]);
 
-export function findSourceFiles(repoRoot: string, roots: string[]): string[] {
-  const out: string[] = [];
+export function findSourceFilesWithErrors(
+  repoRoot: string,
+  roots: string[]
+): { files: string[]; errors: TraversalError[] } {
+  const files: string[] = [];
+  const errors: TraversalError[] = [];
+
   const walk = (dir: string): void => {
     let entries: string[];
     try {
       entries = readdirSync(dir);
-    } catch {
+    } catch (err: unknown) {
+      errors.push({
+        path: normalizePath(path.relative(repoRoot, dir)),
+        error: (err as Error).message,
+      });
       return;
     }
     for (const entry of entries) {
@@ -70,18 +85,34 @@ export function findSourceFiles(repoRoot: string, roots: string[]): string[] {
       let isDir = false;
       try {
         isDir = statSync(full).isDirectory();
-      } catch {
+      } catch (err: unknown) {
+        errors.push({
+          path: normalizePath(path.relative(repoRoot, full)),
+          error: (err as Error).message,
+        });
         continue;
       }
       if (isDir) {
         walk(full);
       } else if (/\.tsx?$/.test(entry)) {
-        out.push(normalizePath(path.relative(repoRoot, full)));
+        files.push(normalizePath(path.relative(repoRoot, full)));
       }
     }
   };
+
   for (const root of roots) walk(path.join(repoRoot, root));
-  return out;
+  return { files: files.sort(), errors };
+}
+
+export function findSourceFiles(repoRoot: string, roots: string[]): string[] {
+  return findSourceFilesWithErrors(repoRoot, roots).files;
+}
+
+export interface FeatureFlagScanResult {
+  scannedFiles: string[];
+  traversalErrors: TraversalError[];
+  tsViolations: string[];
+  sqlViolations: string[];
 }
 
 export function scanFeatureFlags(
@@ -92,41 +123,66 @@ export function scanFeatureFlags(
     roots?: string[];
     migrationDir?: string;
   }
-): { tsViolations: string[]; sqlViolations: string[] } {
+): FeatureFlagScanResult {
   const allowedTs = options?.allowedTs ?? DEFAULT_ALLOWED_TS_FLAGS;
   const allowedSql = options?.allowedSql ?? DEFAULT_ALLOWED_SQL_FLAGS;
   const roots = options?.roots ?? ['apps', 'packages'];
   const migDir = options?.migrationDir ?? path.join(repoRoot, 'supabase', 'migrations');
 
-  const tsViolations = findSourceFiles(repoRoot, roots)
-    .filter((rel) => !allowedTs.has(rel))
-    .filter((rel) => !/\.test\.tsx?$/.test(rel) && !/\/tests?\//.test(rel))
-    .filter((rel) => {
-      try {
-        return readFileSync(path.join(repoRoot, rel), 'utf8').includes(FEATURE_FLAG_TABLE);
-      } catch {
-        return false;
+  const { files: tsFiles, errors: traversalErrors } = findSourceFilesWithErrors(repoRoot, roots);
+  const scannedFiles = [...tsFiles];
+
+  const tsViolations: string[] = [];
+  for (const rel of tsFiles) {
+    if (allowedTs.has(rel)) continue;
+    if (/\.test\.tsx?$/.test(rel) || /\/tests?\//.test(rel)) continue;
+    try {
+      const content = readFileSync(path.join(repoRoot, rel), 'utf8');
+      if (content.includes(FEATURE_FLAG_TABLE)) {
+        tsViolations.push(rel);
       }
-    });
+    } catch (err: unknown) {
+      traversalErrors.push({ path: rel, error: (err as Error).message });
+    }
+  }
 
   let sqlFiles: string[] = [];
   try {
-    sqlFiles = readdirSync(migDir).filter((f) => f.endsWith('.sql')).sort();
-  } catch {
-    sqlFiles = [];
+    if (existsSync(migDir)) {
+      sqlFiles = readdirSync(migDir).filter((f) => f.endsWith('.sql')).sort();
+      for (const f of sqlFiles) {
+        scannedFiles.push(normalizePath(path.relative(repoRoot, path.join(migDir, f))));
+      }
+    }
+  } catch (err: unknown) {
+    traversalErrors.push({
+      path: normalizePath(path.relative(repoRoot, migDir)),
+      error: (err as Error).message,
+    });
   }
 
-  const sqlViolations = sqlFiles
-    .filter((name) => !allowedSql.has(name))
-    .filter((name) => {
-      try {
-        return FEATURE_FLAG_SQL_READ.test(readFileSync(path.join(migDir, name), 'utf8'));
-      } catch {
-        return false;
+  const sqlViolations: string[] = [];
+  for (const name of sqlFiles) {
+    if (allowedSql.has(name)) continue;
+    try {
+      const content = readFileSync(path.join(migDir, name), 'utf8');
+      if (FEATURE_FLAG_SQL_READ.test(content)) {
+        sqlViolations.push(name);
       }
-    });
+    } catch (err: unknown) {
+      traversalErrors.push({
+        path: normalizePath(path.relative(repoRoot, path.join(migDir, name))),
+        error: (err as Error).message,
+      });
+    }
+  }
 
-  return { tsViolations, sqlViolations };
+  return {
+    scannedFiles: scannedFiles.sort(),
+    traversalErrors,
+    tsViolations: tsViolations.sort(),
+    sqlViolations: sqlViolations.sort(),
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -157,6 +213,12 @@ export function isTextishFile(rel: string): boolean {
   );
 }
 
+export interface DeadDomainScanResult {
+  scannedFiles: string[];
+  traversalErrors: TraversalError[];
+  violations: string[];
+}
+
 export function scanDeadDomains(
   repoRoot: string,
   options?: {
@@ -165,7 +227,7 @@ export function scanDeadDomains(
     guardedFiles?: string[];
     exemptFiles?: Set<string>;
   }
-): string[] {
+): DeadDomainScanResult {
   const allowed = options?.allowed ?? DEFAULT_DEAD_DOMAIN_ALLOWED;
   const guardedRoots = options?.guardedRoots ?? ['apps', 'packages', 'deploy', 'supabase'];
   const guardedFiles = options?.guardedFiles ?? ['docker-compose.yml', 'package.json', 'turbo.json'];
@@ -175,11 +237,17 @@ export function scanDeadDomains(
   ]);
 
   const allFiles: string[] = [];
+  const traversalErrors: TraversalError[] = [];
+
   const walk = (dir: string): void => {
     let entries: string[];
     try {
       entries = readdirSync(dir);
-    } catch {
+    } catch (err: unknown) {
+      traversalErrors.push({
+        path: normalizePath(path.relative(repoRoot, dir)),
+        error: (err as Error).message,
+      });
       return;
     }
     for (const entry of entries) {
@@ -188,7 +256,11 @@ export function scanDeadDomains(
       let isDir = false;
       try {
         isDir = statSync(full).isDirectory();
-      } catch {
+      } catch (err: unknown) {
+        traversalErrors.push({
+          path: normalizePath(path.relative(repoRoot, full)),
+          error: (err as Error).message,
+        });
         continue;
       }
       if (isDir) walk(full);
@@ -197,7 +269,8 @@ export function scanDeadDomains(
   };
 
   for (const root of guardedRoots) {
-    walk(path.join(repoRoot, root));
+    const fullRoot = path.join(repoRoot, root);
+    if (existsSync(fullRoot)) walk(fullRoot);
   }
   for (const f of guardedFiles) {
     if (existsSync(path.join(repoRoot, f))) {
@@ -205,17 +278,26 @@ export function scanDeadDomains(
     }
   }
 
-  return allFiles
-    .filter(isTextishFile)
-    .filter((rel) => !allowed.has(rel))
-    .filter((rel) => !exemptFiles.has(rel))
-    .filter((rel) => {
-      try {
-        return DEAD_DOMAIN_PATTERN.test(readFileSync(path.join(repoRoot, rel), 'utf8'));
-      } catch {
-        return false;
+  const textish = allFiles.filter(isTextishFile);
+  const violations: string[] = [];
+
+  for (const rel of textish) {
+    if (allowed.has(rel) || exemptFiles.has(rel)) continue;
+    try {
+      const content = readFileSync(path.join(repoRoot, rel), 'utf8');
+      if (DEAD_DOMAIN_PATTERN.test(content)) {
+        violations.push(rel);
       }
-    });
+    } catch (err: unknown) {
+      traversalErrors.push({ path: rel, error: (err as Error).message });
+    }
+  }
+
+  return {
+    scannedFiles: textish.sort(),
+    traversalErrors,
+    violations: violations.sort(),
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -235,13 +317,19 @@ export function extractEmails(source: string): string[] {
   return source.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g) ?? [];
 }
 
+export interface FixtureEmailsScanResult {
+  scannedFiles: string[];
+  traversalErrors: TraversalError[];
+  violations: { file: string; violations: string[] }[];
+}
+
 export function scanFixtureEmails(
   repoRoot: string,
   options?: {
     exempt?: Set<string>;
     roots?: string[];
   }
-): { file: string; violations: string[] }[] {
+): FixtureEmailsScanResult {
   const exempt = options?.exempt ?? new Set([
     'apps/worker/tests/fixture-emails-are-reserved.test.ts',
     'apps/worker/tests/no-dead-domain.test.ts',
@@ -249,11 +337,17 @@ export function scanFixtureEmails(
   const roots = options?.roots ?? ['apps', 'packages', 'supabase/tests'];
 
   const testFiles: string[] = [];
+  const traversalErrors: TraversalError[] = [];
+
   const walk = (dir: string): void => {
     let entries: string[];
     try {
       entries = readdirSync(dir);
-    } catch {
+    } catch (err: unknown) {
+      traversalErrors.push({
+        path: normalizePath(path.relative(repoRoot, dir)),
+        error: (err as Error).message,
+      });
       return;
     }
     for (const entry of entries) {
@@ -262,27 +356,36 @@ export function scanFixtureEmails(
       let isDir = false;
       try {
         isDir = statSync(full).isDirectory();
-      } catch {
+      } catch (err: unknown) {
+        traversalErrors.push({
+          path: normalizePath(path.relative(repoRoot, full)),
+          error: (err as Error).message,
+        });
         continue;
       }
       if (isDir) walk(full);
       else {
         const rel = normalizePath(path.relative(repoRoot, full));
-        if (/\.test\.(ts|tsx|sql)$/.test(rel) && !exempt.has(rel)) {
+        if (/\.test\.(ts|tsx|sql)$/.test(rel)) {
           testFiles.push(rel);
         }
       }
     }
   };
 
-  for (const r of roots) walk(path.join(repoRoot, r));
+  for (const r of roots) {
+    const fullRoot = path.join(repoRoot, r);
+    if (existsSync(fullRoot)) walk(fullRoot);
+  }
 
   const results: { file: string; violations: string[] }[] = [];
   for (const rel of testFiles) {
+    if (exempt.has(rel)) continue;
     let content = '';
     try {
       content = readFileSync(path.join(repoRoot, rel), 'utf8');
-    } catch {
+    } catch (err: unknown) {
+      traversalErrors.push({ path: rel, error: (err as Error).message });
       continue;
     }
     const emails = extractEmails(content);
@@ -291,11 +394,15 @@ export function scanFixtureEmails(
       return !isReservedEmailDomain(domain);
     });
     if (unreserved.length > 0) {
-      results.push({ file: rel, violations: unreserved });
+      results.push({ file: rel, violations: unreserved.sort() });
     }
   }
 
-  return results;
+  return {
+    scannedFiles: testFiles.sort(),
+    traversalErrors,
+    violations: results,
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -338,6 +445,12 @@ export function extractInstructionLines(content: string, fencedOnly: boolean): {
   return out;
 }
 
+export interface PhantomUnitsScanResult {
+  scannedFiles: string[];
+  traversalErrors: TraversalError[];
+  violations: { file: string; line: number; unit: string; text: string }[];
+}
+
 export function scanPhantomUnits(
   repoRoot: string,
   options?: {
@@ -345,7 +458,7 @@ export function scanPhantomUnits(
     realUnitsSet?: Set<string>;
     systemdDir?: string;
   }
-): { file: string; line: number; unit: string; text: string }[] {
+): PhantomUnitsScanResult {
   const allowed = options?.allowed ?? new Map([
     ['deploy/check-host.sh', 'Asserts units are NOT enabled'],
   ]);
@@ -359,6 +472,8 @@ export function scanPhantomUnits(
     { dir: 'packages', exts: ['.ts', '.tsx'], fencedOnly: false },
   ];
 
+  const scannedFiles: string[] = [];
+  const traversalErrors: TraversalError[] = [];
   const violations: { file: string; line: number; unit: string; text: string }[] = [];
 
   for (const root of searchRoots) {
@@ -370,7 +485,11 @@ export function scanPhantomUnits(
       let entries: string[];
       try {
         entries = readdirSync(d);
-      } catch {
+      } catch (err: unknown) {
+        traversalErrors.push({
+          path: normalizePath(path.relative(repoRoot, d)),
+          error: (err as Error).message,
+        });
         return;
       }
       for (const entry of entries) {
@@ -379,7 +498,11 @@ export function scanPhantomUnits(
         let isDir = false;
         try {
           isDir = statSync(full).isDirectory();
-        } catch {
+        } catch (err: unknown) {
+          traversalErrors.push({
+            path: normalizePath(path.relative(repoRoot, full)),
+            error: (err as Error).message,
+          });
           continue;
         }
         if (isDir) walk(full);
@@ -391,11 +514,13 @@ export function scanPhantomUnits(
     walk(dir);
 
     for (const rel of files) {
+      scannedFiles.push(rel);
       if (rel === 'apps/worker/tests/no-phantom-units.test.ts' || allowed.has(rel)) continue;
       let content = '';
       try {
         content = readFileSync(path.join(repoRoot, rel), 'utf8');
-      } catch {
+      } catch (err: unknown) {
+        traversalErrors.push({ path: rel, error: (err as Error).message });
         continue;
       }
       for (const { line, text } of extractInstructionLines(content, root.fencedOnly)) {
@@ -408,7 +533,11 @@ export function scanPhantomUnits(
     }
   }
 
-  return violations;
+  return {
+    scannedFiles: scannedFiles.sort(),
+    traversalErrors,
+    violations,
+  };
 }
 
 // -----------------------------------------------------------------------------
@@ -469,20 +598,32 @@ export function reachesInSource(source: string, file = '<memory>'): ReachRecord[
   return found;
 }
 
+export interface CutProvidersScanResult {
+  scannedFiles: string[];
+  traversalErrors: TraversalError[];
+  violations: ReachRecord[];
+}
+
 export function scanCutProviders(
   repoRoot: string,
   options?: {
     productionRoots?: string[];
   }
-): ReachRecord[] {
+): CutProvidersScanResult {
   const roots = options?.productionRoots ?? DEFAULT_PRODUCTION_ROOTS;
+  const scannedFiles: string[] = [];
+  const traversalErrors: TraversalError[] = [];
   const hits: ReachRecord[] = [];
 
   const walk = (dir: string, out: string[]): void => {
     let entries: string[];
     try {
       entries = readdirSync(dir);
-    } catch {
+    } catch (err: unknown) {
+      traversalErrors.push({
+        path: normalizePath(path.relative(repoRoot, dir)),
+        error: (err as Error).message,
+      });
       return;
     }
     for (const entry of entries) {
@@ -491,7 +632,11 @@ export function scanCutProviders(
       let isDir = false;
       try {
         isDir = statSync(full).isDirectory();
-      } catch {
+      } catch (err: unknown) {
+        traversalErrors.push({
+          path: normalizePath(path.relative(repoRoot, full)),
+          error: (err as Error).message,
+        });
         continue;
       }
       if (isDir) walk(full, out);
@@ -507,15 +652,21 @@ export function scanCutProviders(
     const files: string[] = [];
     walk(dir, files);
     for (const rel of files) {
+      scannedFiles.push(rel);
       let content = '';
       try {
         content = readFileSync(path.join(repoRoot, rel), 'utf8');
-      } catch {
+      } catch (err: unknown) {
+        traversalErrors.push({ path: rel, error: (err as Error).message });
         continue;
       }
       hits.push(...reachesInSource(content, rel));
     }
   }
 
-  return hits;
+  return {
+    scannedFiles: scannedFiles.sort(),
+    traversalErrors,
+    violations: hits,
+  };
 }

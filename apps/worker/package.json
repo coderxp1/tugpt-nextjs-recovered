@@ -13,6 +13,7 @@
     "start:draft": "node dist/draft-index.js",
     "start:transcription": "node dist/transcription-index.js",
     "test": "vitest run",
+    "test:integration": "vitest run --config vitest.integration.config.ts",
     "typecheck": "tsc --noEmit",
     "lint": "eslint ."
   },

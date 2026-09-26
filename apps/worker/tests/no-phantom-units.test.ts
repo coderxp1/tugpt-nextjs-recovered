@@ -157,8 +157,10 @@ describe('no runbook drives a unit this host does not have', () => {
   });
 
   it('no operational instruction names a unit that does not exist', () => {
-    const violations = scanPhantomUnits(REPO_ROOT);
-    const found = violations.map((v) => `${v.file}:${v.line}  ${v.unit}  — ${v.text}`);
+    const result = scanPhantomUnits(REPO_ROOT);
+    expect(result.traversalErrors).toEqual([]);
+    expect(result.scannedFiles.length).toBeGreaterThan(10);
+    const found = result.violations.map((v) => `${v.file}:${v.line}  ${v.unit}  — ${v.text}`);
     expect(
       found,
       `These instructions drive a systemd unit that is not in deploy/systemd/:\n  ` +

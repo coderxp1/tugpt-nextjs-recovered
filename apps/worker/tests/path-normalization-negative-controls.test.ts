@@ -56,11 +56,12 @@ describe('negative controls: feature-flag-sole-reader guard', () => {
       ].join('\n');
       writeFileSync(path.join(migDir, '20269999000000_unauthorized_reader.sql'), badSql);
 
-      const { tsViolations, sqlViolations } = scanFeatureFlags(dir, {
+      const { tsViolations, sqlViolations, traversalErrors } = scanFeatureFlags(dir, {
         roots: ['apps'],
         migrationDir: migDir,
       });
 
+      expect(traversalErrors).toEqual([]);
       expect(tsViolations).toEqual(['apps/worker/src/violating-service.ts']);
       expect(sqlViolations).toEqual(['20269999000000_unauthorized_reader.sql']);
     } finally {
@@ -91,11 +92,12 @@ describe('negative controls: no-dead-domain guard', () => {
       writeFileSync(path.join(migDir, 'bad-config.sql'), `INSERT INTO config VALUES ('${deadHyphen}');\n`);
       writeFileSync(path.join(dir, 'docker-compose.yml'), `services:\n  web:\n    image: ${deadUnderscore}:latest\n`);
 
-      const violations = scanDeadDomains(dir, {
+      const { violations, traversalErrors } = scanDeadDomains(dir, {
         guardedRoots: ['apps', 'deploy', 'supabase'],
         guardedFiles: ['docker-compose.yml'],
       });
 
+      expect(traversalErrors).toEqual([]);
       expect(violations.sort()).toEqual([
         'apps/worker/src/bad-endpoint.ts',
         'deploy/bad-cert.sh',
@@ -131,10 +133,11 @@ describe('negative controls: fixture-emails-are-reserved guard', () => {
       const badSql = `INSERT INTO users VALUES ('${unreservedEmail2}'), ('admin@localhost');`;
       writeFileSync(path.join(sqlTests, 'violating.test.sql'), badSql);
 
-      const results = scanFixtureEmails(dir, {
+      const { violations: results, traversalErrors } = scanFixtureEmails(dir, {
         roots: ['apps', 'supabase/tests'],
       });
 
+      expect(traversalErrors).toEqual([]);
       const mapped = results.map((r) => ({
         file: r.file,
         violations: r.violations.sort(),
@@ -191,8 +194,9 @@ describe('negative controls: no-phantom-units guard', () => {
       ].join('\n');
       writeFileSync(path.join(docsDir, 'runbook.md'), badMd);
 
-      const violations = scanPhantomUnits(dir, { systemdDir });
+      const { violations, traversalErrors } = scanPhantomUnits(dir, { systemdDir });
 
+      expect(traversalErrors).toEqual([]);
       expect(violations).toEqual([
         {
           file: 'docs/runbook.md',
@@ -235,10 +239,11 @@ describe('negative controls: production-never-imports-cut-providers guard', () =
         "/**\n * LogiccAdapter and AnymizeAdapter are excluded.\n */\nexport const ok = true;\n"
       );
 
-      const hits = scanCutProviders(dir, {
+      const { violations: hits, traversalErrors } = scanCutProviders(dir, {
         productionRoots: ['apps/worker/src'],
       });
 
+      expect(traversalErrors).toEqual([]);
       expect(hits).toHaveLength(2);
       expect(hits).toContainEqual({
         file: 'apps/worker/src/bad-import.ts',

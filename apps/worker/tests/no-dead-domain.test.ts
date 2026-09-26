@@ -27,13 +27,12 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
 import {
   scanDeadDomains,
   DEAD_DOMAIN_PATTERN,
   DEFAULT_DEAD_DOMAIN_ALLOWED,
-  isTextishFile,
 } from './helpers/architectural-guards';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
@@ -52,57 +51,14 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
  */
 const DEAD_DOMAIN = DEAD_DOMAIN_PATTERN;
 
-/** Directories that run or deploy. Prose lives elsewhere and is not guarded. */
-const GUARDED_ROOTS = ['apps', 'packages', 'deploy', 'supabase'];
-
-/** Individual files outside those roots that still ship or deploy. */
-const GUARDED_FILES = ['docker-compose.yml', 'package.json', 'turbo.json'];
-
-const SKIP_DIRS = new Set([
-  'node_modules',
-  'dist',
-  '.next',
-  '.turbo',
-  '.git',
-  'coverage',
-]);
-
 const ALLOWED = DEFAULT_DEAD_DOMAIN_ALLOWED;
 
-function walk(dir: string, out: string[]): void {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (SKIP_DIRS.has(entry)) continue;
-    const full = path.join(dir, entry);
-    let isDir: boolean;
-    try {
-      isDir = statSync(full).isDirectory();
-    } catch {
-      continue;
-    }
-    if (isDir) walk(full, out);
-    else out.push(path.relative(REPO_ROOT, full).split(path.sep).join('/'));
-  }
-}
-
-function guardedFiles(): string[] {
-  const out: string[] = [];
-  for (const root of GUARDED_ROOTS) walk(path.join(REPO_ROOT, root), out);
-  for (const f of GUARDED_FILES) out.push(f);
-  return out;
-}
-
-const isTextish = isTextishFile;
-
 describe('the dead domain does not come back', () => {
-  it('finds the tree it is guarding (a moved root must fail loudly, not silently pass)', () => {
-    const files = guardedFiles().filter(isTextish);
-    expect(files.length, 'guarded file set looks empty — check GUARDED_ROOTS').toBeGreaterThan(80);
+  const result = scanDeadDomains(REPO_ROOT);
+
+  it('finds the tree it is guarding without traversal errors', () => {
+    expect(result.traversalErrors).toEqual([]);
+    expect(result.scannedFiles.length, 'guarded file set looks empty — check GUARDED_ROOTS').toBeGreaterThan(80);
   });
 
   it('matches every spelling, including the two the hand audit missed', () => {
@@ -122,7 +78,7 @@ describe('the dead domain does not come back', () => {
   });
 
   it('no runtime or deploy file references it', () => {
-    const offenders = scanDeadDomains(REPO_ROOT);
+    const offenders = result.violations;
 
     expect(
       offenders,
