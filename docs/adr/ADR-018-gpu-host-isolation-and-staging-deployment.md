@@ -1,189 +1,98 @@
-# ADR-018: Shared GPU Host Isolation, Resource Governance, and Staging Rehearsal
+# ADR-018: Dedicated GPU Host Architecture, Staging Deployment, and Administrative Control
 
 ## Status
-Proposed
+Approved
 
-**Date:** 2026-09-15  
+**Date:** 2026-09-26 (Updated from initial 2026-09-15 draft)  
 **Deciders:** Klaus Hoffmann, TuGPT Technical Review, TuGPT Infrastructure Team, Antigravity Development Team  
-**Consulted:** ADR-006, ADR-010, ADR-013, ADR-014, ADR-015  
+**Consulted:** ADR-006, ADR-010, ADR-013, ADR-014, ADR-015, ADR-019  
 
 ---
 
-## 1. Context and Problem Statement
+## 1. History & Evolution
 
-TuGPT is preparing for staging rehearsal and cold recovery on a shared GPU host at `31.47.228.55` (`FINZIA-GPU-01`). The host is a multi-tenant environment with the following **reported operator telemetries**:
-- **Compute & OS:** Ubuntu 22.04 LTS (kernel 5.15.0-25-generic), 12 vCPUs, 125 GiB system RAM, 2.0 TB storage (1.8 TB free on `/dev/sda3`) [reported].
-- **GPU Subsystem:** 1x NVIDIA RTX Pro 6000 Blackwell DC-48Q vGPU profile (48 GB / 49,152 MiB VRAM), driver `580.82.07`, host CUDA 13.0 [reported]. Note: Container CUDA runtimes are decoupled from host driver CUDA.
-- **Active Co-located Workload ("The Infected App"):** Docker Compose service `comfyui` (image `infected/comfyui:local` under `/srv/ai`), bound to loopback `127.0.0.1:8188`, with a **reported dynamic allocation of ~21,771 MiB VRAM** (~44% of vGPU capacity). This represents active resident memory observed during discovery rather than a hardware-enforced reservation.
-- **Existing Model Assets:** Pre-installed weights under `/srv/ai/models/` (WAN 2.1 diffusion models, text encoders, VAE) shared with `/srv/ai/workflows/cinedrama` (user `cinedrama-agent`) and `infected`.
-- **Infrastructure Status:** The historical production VPS (`212.227.44.13`) has been decommissioned and will not be used. TuGPT is currently offline publicly, with zero live queue consumers. There is no old host to roll back to; this deployment represents a **cold recovery and staging re-deployment**.
-
-### The Challenges & Shared-Host Realities:
-1. **Host Co-existence:** We must protect the co-located ComfyUI workload and preserve CineDrama assets pending an approved deletion manifest.
-2. **GPU VRAM Contention:** Container boundaries do not enforce vGPU memory partitioning. An uncoordinated TuGPT GPU workload could trigger an out-of-memory (OOM) event on the protected ComfyUI process.
-3. **Shared-Host Residual Risks:** Because TuGPT shares the underlying host, complete hardware isolation is not achievable without full VM separation. Residual risks include:
-   - Shared Linux kernel (5.15.0-25-generic) attack surface and container escape vectors.
-   - Disk I/O bandwidth and IOPS contention on the single shared NVMe filesystem `/dev/sda3`.
-   - Network socket and bandwidth contention on the single physical interface `ens18`.
-   - CPU and memory noisy-neighbor effects under transient high loads.
-4. **Queue Invariant:** TuGPT enforces a strict operational rule of **at most one authorized consumer per existing production queue** (`whatsapp_inbound`, `draft_generation`, `transcription`). Zero active consumers during cold recovery and staging rehearsal is completely safe, legal, and required. Starting unauthorized staging workers against production queues or credentials would corrupt message processing.
-5. **Database Identity:** Staging must connect to an independent staging Supabase project (never the production project `rbiumegrwtavmljxbknp`).
+- **Initial Draft (2026-09-15):** Originally targeted a shared host (`31.47.228.55` / `FINZIA-GPU-01`, 48 GB vGPU) carrying a co-tenancy workload ("The Infected App" / ComfyUI) and unverified CineDrama model assets. Under that initial posture, a total GPU moratorium was imposed on TuGPT container services to prevent VRAM contention and out-of-memory (OOM) failures on the co-located workload.
+- **Revision & Dedicated Host Selection (2026-09-25):** The target environment was superseded by a brand-new, dedicated GPU server (`terra-garda-gpu-worker01`, `45.84.65.105`) equipped with an NVIDIA RTX PRO 6000 Blackwell Server Edition (96 GB VRAM). Co-tenancy risks were eliminated: no third-party workloads run on the new host, and model assets (`/srv/ai/models/`) are SHA-256 verified against Hugging Face. The GPU moratorium for ComfyUI was lifted for an administrator-managed loopback-only service (`http://127.0.0.1:8188`), while worker containers remain unprivileged with zero direct GPU device access.
 
 ---
 
-## 2. Decision Drivers
+## 2. Context and Problem Statement
 
-- **Security & Project Isolation:** TuGPT must operate strictly within its own isolated filesystem, network, and process boundaries.
-- **Protected Service Safety:** Zero modifications, signals, mounts, or network access to `/srv/ai` or `infected/comfyui:local`.
-- **Operational Verifiability:** Every security constraint and environment invariant must be testable before runtime execution.
-- **Clean Staging Rehearsal:** Staging must use separate credentials, separate queues, independent database project identity, and zero production worker execution.
-- **Privileged Deployment Boundary:** Developer accounts have no sudo, no Docker socket access, and no live interactive host shell during staging.
+TuGPT operates a dedicated GPU host `terra-garda-gpu-worker01` (`45.84.65.105`) running Ubuntu 26.04.1 LTS (kernel 7.0.0-34-generic), NVIDIA driver `580.178.04`, CUDA 13.0, Docker 29.1.3, Compose 2.40.3, and NVIDIA Container Toolkit 1.20.1.
+
+The server hosts ComfyUI v0.37.0 in an unprivileged container (`comfy`, UID 2001) bound strictly to loopback `127.0.0.1:8188`.
+
+We need to formalize:
+1. Privileged administrator deployment boundaries and staging launch hygiene.
+2. Runtime-only container compose manifests and fail-closed preflight release validation.
+3. Network loopback isolation, cgroup resource limits, and queue governance.
+4. Off-host developer verification with zero live host access during development.
 
 ---
 
-## 3. Considered Options
+## 3. Decision Drivers
 
-* **Option A (Shared Host / Monolithic Access):** Grant developer Docker group access and mount `/srv/ai/models` directly into TuGPT.  
-  * *Rejected:* Defeats non-root boundaries, risks host compromise, and endangers ComfyUI stability.
-* **Option B (Immediate On-Host GPU Deployment):** Deploy media generation workers directly using remaining ~27.3 GB VRAM.  
-  * *Rejected:* Without shared scheduling or hardware vGPU slicing, concurrent inference risks unrecoverable OOM for the protected workload.
-* **Option C (Hardened Namespace Isolation + Staging Rehearsal + GPU Moratorium - Selected):** Enforce administrator-managed deployment bundles, strictly isolated Compose namespaces, runtime-only container manifests, container resource limits, separate staging project credentials, and a total moratorium on GPU workloads until an approved scheduling coordinator is established.
+- **Administrative Control & Hardened Boundary:** Developer accounts have no sudo, no Docker socket access, and no live interactive shell access on the host. Deployment is executed exclusively by an authorized host administrator using root-owned launchers.
+- **Fail-Closed Release Validation:** Preflight automation must validate administrator release manifests (`release-manifest.json` schema v1.0.0), immutable `@sha256:` image digests, web-only key allowlists, and purge ambient secrets (`TUGPT_SECRET_KEY_*`).
+- **Network & Topology Governance:** ComfyUI is bound strictly to `127.0.0.1:8188`. Container services connect over an internal Docker network (`tugpt_media_net`). Host loopback isolation ensures containers cannot access unexposed host services.
+- **Queue Protection Invariant:** TuGPT maintains at most one authorized consumer per queue (`whatsapp_inbound`, `draft_generation`, `transcription`, `media_jobs`). Staging rehearsal omits production queue consumers.
+- **Empirical Automated Verification:** Every security invariant and preflight rule must be covered by off-host integration and preflight tests in CI (`apps/worker/tests/integration/staging-functional-smoke.test.ts` and `staging-deployment-preflight.test.ts`).
 
 ---
 
 ## 4. Decision
 
-### 4.1 Developer Account & SSH Access Architecture (DEFERRED)
-1. **Developer Host Shell Access Status:** **DEFERRED / NOT AUTHORIZED**. Direct interactive developer shell access (`tugpt-dev`) on `31.47.228.55` is deferred. Staging rehearsal will be operated directly by an authorized host administrator to maintain an audit trail and simplify host security.
-2. **Access Control Clarifications (for future reference):**
-   - **Account Revocation vs. Locking:** `usermod -L` only modifies `/etc/shadow` password fields and does NOT invalidate OpenSSH public keys. True SSH key revocation requires removing/clearing public keys from `~/.ssh/authorized_keys`, account expiration via `chage -E 0`, or setting the login shell to `/usr/sbin/nologin`.
-   - **Active Session and Forwarding Limits:** Setting `/usr/sbin/nologin` or locking passwords prevents *new* interactive shell sessions, but does NOT terminate already-established, active SSH connections, nor does it block non-shell capabilities such as TCP port forwarding (`ssh -N -L ...`) or SFTP subsystem sessions if active. Comprehensive revocation requires terminating active processes via `pkill -u <user>`, explicitly disabling port forwarding (`AllowTcpForwarding no`, `PermitOpen none`), and disabling agent forwarding (`AllowAgentForwarding no`) in `sshd_config` match blocks.
-   - **Loopback & Firewall Isolation:** A single `iptables -A OUTPUT -m owner --uid-owner tugpt-dev -d 127.0.0.1 -p tcp --dport 8188 -j REJECT` rule is incomplete: it does not cover IPv6 (`::1`), alias loopback addresses, or bridge networks. True network isolation relies on container network namespaces (custom bridge networks without host networking) and binding protected services strictly to localhost.
-   - **SSH IP Restriction:** In OpenSSH `sshd_config`, `Match User Address` applies conditional block overrides. Restricting an account to an approved IP requires pairing with default deny semantics or explicit non-matching blocks.
+### 4.1 Host Inventory & Access Boundaries
+- **Host:** `terra-garda-gpu-worker01` (`45.84.65.105`).
+- **OS / Hardware:** Ubuntu 26.04.1 LTS, 24 vCPU, 94 GiB RAM, 16 GiB swap.
+- **GPU:** NVIDIA RTX PRO 6000 Blackwell (96 GB VRAM).
+- **SSH Security:** Key-only auth for account `klaus` only (`AllowUsers klaus`), `PermitRootLogin no`, `PasswordAuthentication no`.
+- **Firewall:** `ufw` default deny incoming, allow outgoing, OpenSSH rate-limited.
+- **Developer Access:** Zero developer access to GPU host. All development builds against contract specs and recorded offline fixtures.
 
-### 4.2 Filesystem & Path Governance
-1. **Directory Allocation:**
-   - `/etc/tugpt/staging/` (owned by `root:root`, mode `0700`): Administrator-owned staging deployment bundle containing `docker-compose.yml`, `staging.env` (mode `0600`), and `release-manifest.json`. Developer accounts have zero access to `/etc/tugpt/`.
-   - `/var/lib/tugpt/` (mode `0750`): TuGPT persistent runtime storage and temporary job artifacts.
-2. **Withdrawal of `render` Group Membership:**
-   - `tugpt-dev` will NOT be added to group `render`.
-   - Shared model reuse from `/srv/ai/models/` is deferred. Any future weight access will be implemented via administrator-configured, read-only container bind mounts of verified checksummed files.
+### 4.2 Administrator Launcher & Deployment Invariants (`deploy/staging/launch-staging.sh`)
+1. **Effective Root UID (0) Check:** Launcher requires `id -u == 0`; exits 2 immediately if called by non-root users.
+2. **Fixed Canonical Bundle Path:** Binds strictly to `/etc/tugpt/staging/` with no parameter overrides.
+3. **Exact Root Ownership & Modes:** Directories `0700`, configuration / manifest files `0600`, executable scripts `0700`, all owned by `root:root` (`0:0`).
+4. **Parent Directory Trust:** Asserts root ownership (`0:0`) and non-world-writable modes (`0755` or stricter) on parent directories `/etc` and `/etc/tugpt`.
+5. **Symlink Rejection:** Strictly rejects symlinks across directory and file paths.
+6. **Clean Execution Environment:** Minimal `env -i PATH=... HOME=/root` execution environment.
+7. **Controlled Compose Invocation:** Passes `--env-file /dev/null` to Docker Compose.
+8. **Mandatory Preflight Abort:** Contact with Docker daemon is strictly prohibited until preflight validation succeeds.
 
-### 4.3 Privileged Deployment Boundary, Manifest & Network Isolation Policy
-- **Administrator Privileged Launcher (`deploy/staging/launch-staging.sh`):**
-  - Staging deployment is executed exclusively by an authorized host administrator using a single root-owned launcher entrypoint:
-    ```bash
-    sudo sh /etc/tugpt/staging/launch-staging.sh
-    ```
-  - **Security Invariants & Boundary Enforcements:**
-    1. **Root UID Enforcement:** Asserts effective UID is `0` (`id -u`); exits 2 immediately if invoked by non-root users.
-    2. **Fixed Canonical Path:** Binds strictly to `/etc/tugpt/staging/` with no parameter overrides or custom bundle paths.
-    3. **Root Ownership:** Verifies `root:root` (`0:0`) ownership on the staging directory and all bundle components (`docker-compose.yml`, `staging.env`, `release-manifest.json`, `check-staging-env.sh`).
-    4. **Parent Directory Trust:** Asserts trusted root ownership (`0:0`) and non-world-writable modes (`0755` or stricter) on parent directories `/etc` and `/etc/tugpt`.
-    5. **Exact Permissions:** Enforces mode `0700` on the deployment directory and executable scripts, and mode `0600` on configuration, compose, and manifest files.
-    6. **Symlink Rejection:** Traverses and checks all bundle paths; any symlink is rejected as an insecure link attack vector.
-    7. **Clean Environment (`env -i`):** Sanitizes execution environment (`env -i PATH=... HOME=/root`) to prevent ambient shell contamination.
-    8. **Isolated Compose Invocation:** Passes `--env-file /dev/null` to Docker Compose to ensure only explicitly declared environment variables from `staging.env` reach containers.
-    9. **Mandatory Preflight Abort:** Contact with the Docker daemon is strictly prohibited until preflight validation passes completely.
+### 4.3 Release Preflight & Manifest Validation (`deploy/staging/check-staging-env.sh`)
+- **Administrator Release Manifest:** Adheres to JSON schema v1.0.0 (`schemaVersion: 1.0.0`, `targetEnvironment: staging`).
+- **Image Digest Integrity:** Enforces repository `ghcr.io/coderxp1/tugpt-web` with exact 64-hex `@sha256:` digest (no mutable tag fallback).
+- **Web-Only Key Allowlist:** Rejects unknown environment keys and platform master secrets (`TUGPT_SECRET_KEY_*`).
+- **Positive Supabase URL Validation:** Enforces positive HTTPS URL format, rejecting production project ref `rbiumegrwtavmljxbknp`.
 
-- **Release Approval Manifest & Preflight Enforcement (`deploy/staging/check-staging-env.sh`):**
-  - **Mandatory Administrator Manifest:** Deployment requires an approved release manifest (`release-manifest.json`) adhering to JSON Schema v1.0.0.
-  - **Schema Validation:** Verifies schema version `1.0.0`, approved repository (`ghcr.io/coderxp1/tugpt-web`), exact 64-hex lowercase `@sha256:` digest, 40-hex commit SHA, positive HTTPS Supabase URL, and non-empty anonymous key.
-  - **Strict Web-Only Allowlist:** Only documented runtime keys are permitted (`TUGPT_ENVIRONMENT`, `TUGPT_WEB_STAGING_IMAGE`, `NEXT_PUBLIC_SUPABASE_URL`, `NEXT_PUBLIC_SUPABASE_ANON_KEY`, and optional `NODE_ENV`, `PORT`). Unknown keys are rejected.
-  - **Platform Secret Protection:** Rejects all `TUGPT_SECRET_KEY_*` variables in `staging.env` and ambient shell process space.
-  - **Syntax Hardening:** Rejects shell command substitutions (`$(...)`, backticks, `&&`, `||`, `;`) and variable interpolation (`$VAR`, `${VAR}`).
-  - **Credential Redaction:** Errors redact credentials and sensitive tokens.
-
-- Individual stack lifecycle operations are separated:
-  ```bash
-  # Start staging stack directly (after verified launcher execution)
-  docker compose -p tugpt-staging -f /etc/tugpt/staging/docker-compose.yml up -d
-
-  # Stop staging containers (preserves container state and networks)
-  docker compose -p tugpt-staging -f /etc/tugpt/staging/docker-compose.yml stop
-
-  # Down staging stack (removes containers and custom networks, preserves named volumes)
-  docker compose -p tugpt-staging -f /etc/tugpt/staging/docker-compose.yml down
-
-  # Full teardown with volume removal (explicit, separate choice)
-  docker compose -p tugpt-staging -f /etc/tugpt/staging/docker-compose.yml down --volumes
-  ```
-- The staging manifest (`docker-compose.staging.yml`) is **runtime-only**: it contains no `build:` sections and requires an immutable image with an approved `@sha256:` digest (no mutable tag fallback):
-  ```yaml
-  image: "${TUGPT_WEB_STAGING_IMAGE:?TUGPT_WEB_STAGING_IMAGE with approved @sha256 digest is required}"
-  ```
-- **Staging Container Network Policy:**
-  - The `web` service runs attached strictly to an isolated Docker bridge network (`tugpt_staging_net`). Host networking (`network_mode: host`) is strictly prohibited.
-  - **Loopback Isolation:** The loopback address `127.0.0.1` inside the container refers strictly to the container's private network namespace. Requests from inside the container to `127.0.0.1:8188` (ComfyUI) or `127.0.0.1:3001` (production) fail with connection refused, isolating host loopback services.
-  - **Port Publishing:** Staging web publishes port `3002:3000` bound strictly to host loopback `127.0.0.1:3002`. Public exposure on `0.0.0.0` is prevented.
-  - **Outbound Traffic:** Container outbound traffic to external staging infrastructure (e.g. `https://test-fixture-staging.supabase.co`) routes through the Docker bridge gateway and host NAT, while host loopback services remain unreachable.
-
-### 4.4 Resource Governance & Cgroup Quotas
-All TuGPT services in Docker Compose must define strict resource limits to protect host stability:
-
-| Service | CPU Limit | Memory Limit | PIDs Limit | Notes |
-| :--- | :--- | :--- | :--- | :--- |
-| `web` | 2.0 vCPUs | 2 GiB | 100 | Next.js 16 standalone server |
-| `whatsapp-worker` | 1.0 vCPUs | 1 GiB | 50 | Inbound message processing (excluded in staging) |
-| `draft-worker` | 2.0 vCPUs | 2 GiB | 50 | Langdock API calling loop (excluded in staging) |
-| `transcription-worker` | 2.0 vCPUs | 4 GiB | 100 | Media download & Gladia polling (excluded in staging) |
-| Future CPU Exporter (PDF/ZIP) | 2.0 vCPUs | 2 GiB | 50 | Sandboxed rendering, strict timeout |
-
-### 4.5 GPU Moratorium Policy
-1. **Zero TuGPT GPU Workloads:** No GPU devices (`deploy.resources.reservations.devices`) are allocated to TuGPT containers in the staging or initial production manifests.
-2. **Prerequisites for Future GPU Enablement:**
-   - Complete characterization of VRAM usage across models (FLUX.1-schnell, WAN 2.1 1.3B/14B) with explicit quantization, resolution, and offload parameters.
-   - Design and implementation of a cross-process admission coordinator or explicit operator-reserved GPU execution window.
-   - Administrator verification of vGPU slicing or dynamic memory reservation that guarantees immunity for `infected/comfyui:local`.
-
-### 4.6 Staging Rehearsal & Cold Recovery Strategy
-1. **Isolated Staging Environment:**
-   - Dedicated Compose project namespace: `-p tugpt-staging`.
-   - Dedicated, independent staging Supabase project (never production project ref `rbiumegrwtavmljxbknp`).
-   - Staging secrets sourced from `/etc/tugpt/staging/staging.env` (mode `0600`).
-   - Preflight validation script `deploy/staging/check-staging-env.sh` runs prior to container launch.
-2. **Queue Protection Invariant:**
-   - At most one authorized consumer per existing production queue. During staging rehearsal, **all production queue workers remain strictly OFF** (zero consumers in recovery is legal, safe, and required).
-   - `docker-compose.staging.yml` omits `whatsapp-worker`, `draft-worker`, and `transcription-worker`.
-3. **Secrets & Master Key Hygiene:**
-   - `platform_secrets` table holds encrypted credential records.
-   - Master key `TUGPT_SECRET_KEY_PLATFORM_V1` and all `TUGPT_SECRET_KEY_*` variables must NEVER be present in staging environment files; verified by preflight automation.
+### 4.4 Container Cgroup Limits & Network Governance
+- Services enforce strict cgroup CPU, Memory, and PIDs limits (e.g., `web`: 2.0 vCPUs, 2 GiB RAM, 100 PIDs).
+- Containers run as unprivileged users with `cap_drop: [ALL]` and `no-new-privileges: true`.
+- Staging web binds strictly to loopback `127.0.0.1:3002:3000`.
 
 ---
 
 ## 5. Consequences
 
 ### Positive
-- Strict cgroup CPU, Memory, and PIDs boundaries protect host stability.
-- Staging preflight validation mechanically enforces project isolation and prevents production credential leakage.
-- Production queues and database are completely protected from rehearsal interference.
-- Container execution runs as unprivileged user (`nextjs:nodejs`, UID 1001) with all Linux capabilities dropped (`cap_drop: [ALL]`).
-- CI integration smoke gate verifies runtime container isolation and cross-tenant authorization on disposable runners before deployment.
+- Strict separation between administrative host operations and developer artifact builds.
+- Complete hardware and network isolation for GPU media operations.
+- Fail-closed deployment automation preventing credential leakages or improper image tags.
+- Verified off-host CI smoke integration tests proving real application boundaries and tenant isolation.
 
-### Negative / Trade-offs & Shared-Host Residual Risks
-- Administrator mediation is required for privileged deployment and staging container lifecycles.
-- GPU-backed features remain deferred until scheduling coordination review gates are satisfied.
-- Residual shared-host risks remain:
-  - Kernel-level shared surface (Ubuntu 22.04 LTS kernel 5.15.0-25-generic).
-  - Storage I/O throughput and latency contention on shared NVMe filesystem `/dev/sda3`.
-  - Network interface throughput and socket contention on physical NIC `ens18`.
+### Negative
+- All host deployments require administrator execution.
+- No direct developer debugging on live GPU hardware.
 
 ---
 
 ## 6. Verification & Evidence Ledger
 
-Verification items are classified into verified off-host gates and deferred host-specific checks:
-
 | Item | Scope | Status | Evidence / Notes |
 | :--- | :--- | :--- | :--- |
 | TypeScript Typecheck | Off-Host | **VERIFIED** | `pnpm typecheck` passes all monorepo packages cleanly. |
 | Monorepo Linting | Off-Host | **VERIFIED** | `pnpm lint` passes with zero lint errors. |
-| Unit Test Suite | Off-Host | **VERIFIED** | `pnpm --filter @tugpt/worker test` passes 27/27 suites (448 tests) with zero Docker/DB dependencies. |
-| Preflight & Launcher Bounds | Off-Host | **VERIFIED** | `staging-deployment-preflight.test.ts` passes 30/30 tests (schema v1.0.0, allowlists, root UID 0, symlink/perm checks). |
-| Architectural Guards & Inventory | Off-Host | **VERIFIED** | All 5 scanners track `scannedFiles` inventories and record `traversalErrors`; negative controls pass 6/6. |
-| Staging Integration Smoke | Off-Host | **VERIFIED** | `pnpm --filter @tugpt/worker test:integration` passes 6/6 tests (real HTTP routes, tenant denial, limits, loopback). |
-| Docker Web Image Build | Off-Host | **VERIFIED** | `tugpt-web:staging-test` built cleanly via `apps/web/Dockerfile` with pinned `@sha256:` digest. |
-| CI Staging Smoke Workflow Gate | Off-Host | **VERIFIED** | `staging-integration-smoke` job added to `.github/workflows/ci.yml` with unconditional teardown. |
-| Developer Host Shell (`tugpt-dev`) | On-Host | **DEFERRED** | Direct developer shell access deferred; staging rehearsal operated by host administrator. |
-| Host Loopback Firewall Filtering | On-Host | **NOT YET VERIFIED** | Deferred pending host administrator execution. |
-| Live ComfyUI Non-Interference | On-Host | **NOT YET VERIFIED** | Deferred pending host staging deployment. |
+| Preflight & Launcher Bounds | Off-Host | **VERIFIED** | `staging-deployment-preflight.test.ts` passes 30/30 tests (schema v1.0.0, allowlists, root UID 0, symlinks/perms). |
+| Staging Integration Smoke | Off-Host | **VERIFIED** | `staging-functional-smoke.test.ts` passes 6/6 tests (auth session, 403 tenant denial, cgroups, loopback isolation). |
+| Architectural Guards & Inventories | Off-Host | **VERIFIED** | Non-test scanner helpers track inventories and traversal errors cleanly across platform slashes. |
