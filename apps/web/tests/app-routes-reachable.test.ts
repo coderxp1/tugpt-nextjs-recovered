@@ -57,6 +57,14 @@ const REACHED_BY: ReadonlyArray<{ path: string; by: string }> = [
     path: '/dashboard/drafts/[draftId]',
     by: 'Every row of the draft list links to one (DraftInbox.test.tsx), as does every conversation with a draft waiting (ConversationInbox.test.tsx). A dynamic route has no single URL to navigate to.',
   },
+  {
+    path: '/dashboard/media/new',
+    by: 'The "Nuevo trabajo" button on the media job list (MediaJobList.tsx) opens the submission form; it is a step in the list flow, not a destination of its own.',
+  },
+  {
+    path: '/dashboard/media/[jobId]',
+    by: 'Every row of the media job list links to one (MediaJobList.test.tsx). A dynamic route has no single URL to navigate to.',
+  },
 ];
 
 const pageRoutes = discoverRoutes(APP_DIR)

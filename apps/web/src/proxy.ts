@@ -49,6 +49,15 @@ const PUBLIC_PREFIXES: readonly string[] = [
   '/api/v1/drafts',
   '/api/v1/organizations',
   '/api/v1/conversations',
+  // Same shape as the drafts API: each handler authenticates for itself
+  // (401 UNAUTHENTICATED envelope), resolves the tenant from the
+  // x-tenant-id header, and answers 403/404 without leaking across orgs.
+  // The proxy's protected path would answer unauthenticated API calls
+  // with a different envelope ({ error: 'Unauthenticated' }), breaking
+  // the documented contract — so, like drafts, the handler is the auth
+  // boundary here. The per-lane quota gate and the enqueue/cancel RPCs
+  // run through service_role and re-check membership.
+  '/api/v1/media',
   // Same shape as the others — each handler authenticates for itself and the
   // RPCs enforce membership and role. `/api/v1/invitations/accept` is the one
   // that must be here rather than 'protected': the proxy's protected path

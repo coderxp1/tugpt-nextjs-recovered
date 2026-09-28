@@ -93,6 +93,24 @@ const ROUTES: RouteExpectation[] = [
     type: 'protected',
     why: 'Draft detail. The proxy is the only gate on the page shell.',
   },
+  {
+    path: '/dashboard/media',
+    kind: 'page',
+    type: 'protected',
+    why: 'Media job list. The proxy is the only gate on the page shell; the API routes behind it authenticate per request.',
+  },
+  {
+    path: '/dashboard/media/new',
+    kind: 'page',
+    type: 'protected',
+    why: 'Media job submission form. Same gate as the list it is reached from.',
+  },
+  {
+    path: '/dashboard/media/[jobId]',
+    kind: 'page',
+    type: 'protected',
+    why: 'Media job detail with private result preview. The proxy is the only gate on the page shell.',
+  },
 
   // Every /api/v1 route below is 'public' to the proxy on purpose: the proxy
   // performs no authentication for them, and each handler authenticates for
@@ -234,6 +252,30 @@ const ROUTES: RouteExpectation[] = [
     kind: 'api',
     type: 'public',
     why: 'Handler authenticates; RLS scopes revisions to the draft owner org.',
+  },
+  {
+    path: '/api/v1/media/jobs',
+    kind: 'api',
+    type: 'public',
+    why: 'Handler authenticates and resolves tenant context; per-lane quota gate and enqueue run through service_role RPCs, reads are RLS-scoped plus an explicit organization_id filter.',
+  },
+  {
+    path: '/api/v1/media/jobs/[jobId]',
+    kind: 'api',
+    type: 'public',
+    why: 'Handler authenticates and resolves tenant context; the lookup is org-scoped so another org\u2019s job answers 404.',
+  },
+  {
+    path: '/api/v1/media/jobs/[jobId]/cancel',
+    kind: 'api',
+    type: 'public',
+    why: 'Handler authenticates and resolves tenant context; cancellation runs through the service_role cancel_media_job RPC after an org-scoped existence check.',
+  },
+  {
+    path: '/api/v1/media/jobs/[jobId]/result',
+    kind: 'api',
+    type: 'public',
+    why: 'Handler authenticates and resolves tenant context; the signed URL is minted service-side only after an org-scoped read authorizes the caller — no customer-facing storage policies exist on the private media bucket.',
   },
 ];
 
