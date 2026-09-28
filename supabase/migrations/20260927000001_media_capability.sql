@@ -185,8 +185,12 @@ CREATE TRIGGER trigger_media_generation_jobs_updated_at
 -- Customer-facing read policies arrive with the API surface (Phase A
 -- item 4), not ahead of it — an untested policy is a liability.
 
-INSERT INTO storage.buckets (id, name, public)
-VALUES ('media', 'media', false)
+-- `public` is deliberately not listed: the column is absent from
+-- storage.buckets in some Supabase Postgres builds (the CI `db start`
+-- image rejects it with 42703), and its default is false everywhere, so
+-- omitting it always yields the private bucket this section specifies.
+INSERT INTO storage.buckets (id, name)
+VALUES ('media', 'media')
 ON CONFLICT (id) DO NOTHING;
 
 -- ---------------------------------------------------------------------------
