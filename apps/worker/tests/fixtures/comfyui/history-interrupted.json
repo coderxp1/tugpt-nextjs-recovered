@@ -1,0 +1,28 @@
+{
+  "prompt-interrupted-uuid-3003": {
+    "prompt": [
+      0,
+      "prompt-interrupted-uuid-3003",
+      {
+        "7": {
+          "inputs": {
+            "seed": 12345,
+            "steps": 20
+          },
+          "class_type": "WanSampler"
+        }
+      },
+      {},
+      []
+    ],
+    "status": {
+      "status_str": "error",
+      "completed": false,
+      "messages": [
+        ["execution_start", {"prompt_id": "prompt-interrupted-uuid-3003"}],
+        ["execution_cached", {"nodes": ["1", "2", "3"]}],
+        ["execution_interrupted", {"node_id": "7", "node_type": "WanSampler", "prompt_id": "prompt-interrupted-uuid-3003"}]
+      ]
+    }
+  }
+}

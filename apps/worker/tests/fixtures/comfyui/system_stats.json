@@ -1,0 +1,19 @@
+{
+  "system": {
+    "os": "posix",
+    "python_version": "3.12.3",
+    "embedded_python": false,
+    "comfyui_version": "0.37.0"
+  },
+  "devices": [
+    {
+      "name": "NVIDIA RTX PRO 6000 Blackwell Server Edition",
+      "type": "cuda",
+      "index": 0,
+      "vram_total": 102641500160,
+      "vram_free": 101850400000,
+      "torch_vram_total": 102641500160,
+      "torch_vram_free": 101850400000
+    }
+  ]
+}
