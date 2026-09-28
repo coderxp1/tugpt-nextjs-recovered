@@ -185,13 +185,31 @@ CREATE TRIGGER trigger_media_generation_jobs_updated_at
 -- Customer-facing read policies arrive with the API surface (Phase A
 -- item 4), not ahead of it — an untested policy is a liability.
 
--- `public` is deliberately not listed: the column is absent from
+-- `public` is not named in the INSERT: the column is absent from
 -- storage.buckets in some Supabase Postgres builds (the CI `db start`
--- image rejects it with 42703), and its default is false everywhere, so
--- omitting it always yields the private bucket this section specifies.
+-- image rejects it with 42703).
 INSERT INTO storage.buckets (id, name)
 VALUES ('media', 'media')
 ON CONFLICT (id) DO NOTHING;
+
+-- The bucket is private, explicitly — not merely by column default. The
+-- UPDATE runs only where the `public` column exists (every real Supabase
+-- project); where the build ships storage.buckets without it there is no
+-- public concept to set. EXECUTE (not a static UPDATE) so the migration
+-- parses on builds where the column is absent.
+DO $media_bucket_private$
+BEGIN
+  IF EXISTS (
+    SELECT 1
+    FROM information_schema.columns
+    WHERE table_schema = 'storage'
+      AND table_name = 'buckets'
+      AND column_name = 'public'
+  ) THEN
+    EXECUTE 'UPDATE storage.buckets SET public = false WHERE id = ''media''';
+  END IF;
+END
+$media_bucket_private$;
 
 -- ---------------------------------------------------------------------------
 -- 4. failed_jobs learns the media terminal vocabulary

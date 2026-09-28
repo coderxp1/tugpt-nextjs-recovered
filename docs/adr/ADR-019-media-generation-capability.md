@@ -2,9 +2,9 @@
 
 ## Status
 
-**Accepted** — 2026-09-28. Phase A item 1 of the media work programme.
-D1 (self-hosted, open-source-only direction) **confirmed by owner 2026-09-28**,
-amending ADR-015 §4.3/§4.4.
+**Proposed** — technical review outstanding. D1 (self-hosted, open-source-only
+direction, amending ADR-015 §4.3/§4.4) **confirmed by owner 2026-09-28**; the
+remaining decisions await review. Phase A item 1 of the media work programme.
 
 ## Context
 

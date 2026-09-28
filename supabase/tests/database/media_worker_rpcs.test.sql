@@ -55,7 +55,7 @@
 CREATE EXTENSION IF NOT EXISTS dblink;
 
 BEGIN;
-SELECT plan(80);
+SELECT plan(82);
 
 -- --- Fixtures --------------------------------------------------------------
 
@@ -735,6 +735,38 @@ SELECT lives_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r3',
     'aaaaaaaa-7c11-0000-0000-0000000000a1/' || (SELECT job_id FROM _r3) || '.png')$$,
   'R18: image job completed with .png succeeds');
+
+-- --- B: storage bucket is explicitly private ---------------------------------------
+--
+-- The migration sets public = false explicitly rather than relying on the
+-- column default. Where the storage build has no public column (the CI
+-- db-start image) there is nothing to assert; where it does, privacy is
+-- proved, not assumed.
+
+SELECT ok(
+  EXISTS (SELECT 1 FROM storage.buckets WHERE id = 'media'),
+  'B1: storage bucket media exists');
+
+SELECT lives_ok(
+  $bkt$
+  DO $bkt_inner$
+  BEGIN
+    IF EXISTS (
+      SELECT 1 FROM information_schema.columns
+      WHERE table_schema = 'storage'
+        AND table_name = 'buckets'
+        AND column_name = 'public'
+    ) THEN
+      IF NOT EXISTS (
+        SELECT 1 FROM storage.buckets WHERE id = 'media' AND public IS FALSE
+      ) THEN
+        RAISE EXCEPTION 'media bucket is not explicitly private';
+      END IF;
+    END IF;
+  END
+  $bkt_inner$;
+  $bkt$,
+  'B2: media bucket is explicitly private (public = false) where the column exists');
 
 SELECT * FROM finish();
 ROLLBACK;
