@@ -322,7 +322,7 @@ BEGIN
   -- kind, or params is a caller bug (or a key collision), and silently
   -- returning the old job would hand back someone else's render.
   IF v_idempotency_key IS NOT NULL THEN
-    SELECT id, pgmq_msg_id, kind, prompt, params INTO v_existing
+    SELECT id, media_generation_jobs.pgmq_msg_id, kind, prompt, params INTO v_existing
     FROM public.media_generation_jobs
     WHERE organization_id = p_organization_id
       AND idempotency_key = v_idempotency_key;
@@ -356,7 +356,7 @@ BEGIN
       -- second case is a resubmit that won nothing — return the winner,
       -- subject to the same conflict check as step 4.
       IF v_idempotency_key IS NOT NULL THEN
-        SELECT id, pgmq_msg_id, kind, prompt, params INTO v_existing
+        SELECT id, media_generation_jobs.pgmq_msg_id, kind, prompt, params INTO v_existing
         FROM public.media_generation_jobs
         WHERE organization_id = p_organization_id
           AND idempotency_key = v_idempotency_key;

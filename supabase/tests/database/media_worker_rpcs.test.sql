@@ -104,8 +104,9 @@ RETURNS TABLE(job_id UUID, already_exists BOOLEAN, pgmq_msg_id BIGINT)
 LANGUAGE plpgsql AS $$
 BEGIN
   RETURN QUERY
-  SELECT * FROM public.enqueue_media_job(
-    p_user, p_org, 'image', 'Un cartel para la clínica', '{}'::jsonb, p_key);
+  SELECT r.job_id, r.already_exists, r.pgmq_msg_id
+  FROM public.enqueue_media_job(
+    p_user, p_org, 'image', 'Un cartel para la clínica', '{}'::jsonb, p_key) AS r;
 END;
 $$;
 
@@ -193,22 +194,22 @@ $$;
 
 SELECT throws_ok(
   $$SELECT * FROM public.enqueue_media_job('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'audio', 'x', '{}'::jsonb, 'p1')$$,
-  'P3M12', 'P1: unknown kind rejected'
+  'P3M12', 'INVALID_MEDIA_PARAMS', 'P1: unknown kind rejected'
 );
 
 SELECT throws_ok(
   $$SELECT * FROM public.enqueue_media_job('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'image', '', '{}'::jsonb, 'p2')$$,
-  'P3M12', 'P2: empty prompt rejected'
+  'P3M12', 'INVALID_MEDIA_PARAMS', 'P2: empty prompt rejected'
 );
 
 SELECT throws_ok(
   $$SELECT * FROM public.enqueue_media_job('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'image', repeat('x', 1001), '{}'::jsonb, 'p3')$$,
-  'P3M12', 'P3: prompt over 1000 chars rejected'
+  'P3M12', 'INVALID_MEDIA_PARAMS', 'P3: prompt over 1000 chars rejected'
 );
 
 SELECT throws_ok(
   $$SELECT * FROM public.enqueue_media_job('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'image', 'ok', '[1]'::jsonb, 'p4')$$,
-  'P3M12', 'P4: non-object params rejected'
+  'P3M12', 'INVALID_MEDIA_PARAMS', 'P4: non-object params rejected'
 );
 
 -- --- E: first enqueue ----------------------------------------------------------
@@ -237,7 +238,7 @@ SELECT is((SELECT job_id FROM _e2), (SELECT job_id FROM _e1),
 -- Serialized approximation of the two-concurrent-callers case (see header TODO).
 SELECT throws_ok(
   $$SELECT * FROM pg_temp.enq('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g2')$$,
-  'P3M09', 'D1: second active job for the org is rejected'
+  'P3M09', 'MEDIA_CONCURRENCY_EXCEEDED', 'D1: second active job for the org is rejected'
 );
 
 -- --- E (cont.): claim -> submit -> complete ----------------------------------------
@@ -310,7 +311,7 @@ CREATE TEMP TABLE _race_out(
   a_job UUID, a_msg BIGINT, b_sqlstate TEXT, active_ct INT, survivor UUID
 );
 
-DO $$
+DO $race$
 DECLARE
   v_conn TEXT := pg_temp.race_connstr();
 BEGIN
@@ -321,7 +322,7 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN
     INSERT INTO _race_env VALUES (false);
   END;
-END $$;
+END $race$;
 
 SELECT diag('D3 genuine race: dblink self-connection ' ||
   CASE WHEN (SELECT avail FROM _race_env) THEN 'available'
@@ -330,7 +331,7 @@ SELECT diag('D3 genuine race: dblink self-connection ' ||
 SELECT skip('D3: dblink self-connection unavailable in this environment', 4)
 WHERE NOT (SELECT avail FROM _race_env);
 
-DO $$
+DO $race$
 DECLARE
   v_conn TEXT := pg_temp.race_connstr();
   v_org  UUID := 'aaaaaaaa-7c11-0000-0000-0000000000d1';
@@ -359,6 +360,14 @@ BEGIN
   PERFORM dblink_exec('race_setup', format(
     $$INSERT INTO public.feature_flags(organization_id,key,is_enabled)
       VALUES ('%s','media_generation',true)$$, v_org));
+  -- The global flag row lives in this session's uncommitted transaction and
+  -- is invisible to the race sessions; commit it for them too (idempotent).
+  PERFORM dblink_exec('race_setup',
+    $$INSERT INTO public.feature_flags(organization_id,key,is_enabled)
+      SELECT NULL,'media_generation',true
+      WHERE NOT EXISTS (SELECT 1 FROM public.feature_flags
+                        WHERE organization_id IS NULL
+                          AND key = 'media_generation')$$);
   PERFORM dblink_exec('race_setup', 'COMMIT');
   PERFORM dblink_disconnect('race_setup');
 
@@ -385,9 +394,11 @@ BEGIN
   EXCEPTION WHEN OTHERS THEN
     v_b_sqlstate := SQLSTATE;
   END;
-  PERFORM dblink_exec('race_b', 'ROLLBACK');
-  PERFORM dblink_disconnect('race_a');
+  -- B's session still holds the failed async query: a plain ROLLBACK on it
+  -- raises "another command is already in progress". Disconnecting aborts
+  -- the remote transaction and releases the speculative insert instead.
   PERFORM dblink_disconnect('race_b');
+  PERFORM dblink_disconnect('race_a');
 
   -- 5. Record the race outcome (A's row is committed; B's rolled back).
   SELECT count(*)::int INTO v_active
@@ -406,7 +417,13 @@ BEGIN
   DELETE FROM public.organization_members WHERE organization_id = v_org;
   DELETE FROM public.profiles WHERE id = v_user;
   DELETE FROM public.organizations WHERE id = v_org;
-END $$;
+  -- race_setup committed a second global flag row (its NOT EXISTS could not
+  -- see this session's uncommitted one); collapse back to exactly one so the
+  -- scalar subquery in is_feature_enabled keeps working.
+  DELETE FROM public.feature_flags WHERE organization_id IS NULL AND key = 'media_generation';
+  INSERT INTO public.feature_flags(organization_id,key,is_enabled)
+  VALUES (NULL,'media_generation',true);
+END $race$;
 
 SELECT is((SELECT b_sqlstate FROM _race_out), 'P3M09',
           'D3a: loser of the genuine two-session race gets P3M09')
@@ -449,11 +466,11 @@ SELECT lives_ok(
 
 SELECT throws_ok(
   $$SELECT pg_temp.cancel_key('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g3', '')$$,
-  'P3M12', 'X6: cancel without a reason rejected');
+  'P3M12', 'INVALID_MEDIA_PARAMS', 'X6: cancel without a reason rejected');
 
 SELECT throws_ok(
   $$SELECT pg_temp.cancel_key('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g1', 'too late')$$,
-  'P3M11', 'X7: cancelling a completed job rejected');
+  'P3M11', 'INVALID_MEDIA_JOB_STATE', 'X7: cancelling a completed job rejected');
 
 -- --- S: prompt_id submission discipline ----------------------------------------------
 
@@ -462,7 +479,7 @@ SELECT is((SELECT count(*)::int FROM public.read_media_jobs(600, 10)), 1,
 
 SELECT throws_ok(
   $$SELECT pg_temp.submit_key('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g3', '')$$,
-  'P3M07', 'S2: empty prompt_id rejected');
+  'P3M07', 'INVALID_MEDIA_SUBMISSION', 'S2: empty prompt_id rejected');
 
 SELECT lives_ok(
   $$SELECT pg_temp.submit_key('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g3', 'p-a')$$,
@@ -474,13 +491,13 @@ SELECT lives_ok(
 
 SELECT throws_ok(
   $$SELECT pg_temp.submit_key('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g3', 'p-b')$$,
-  'P3M08', 'S5: overwriting a recorded prompt_id rejected');
+  'P3M08', 'MEDIA_SUBMISSION_ALREADY_RECORDED', 'S5: overwriting a recorded prompt_id rejected');
 
 -- --- A: archive path -----------------------------------------------------------------
 
 SELECT throws_ok(
   $$SELECT pg_temp.archive_key('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g3', 'NOPE')$$,
-  'P3M06', 'A1: archive rejects codes outside the allowlist');
+  'P3M06', 'INVALID_MEDIA_FAILURE_CODE', 'A1: archive rejects codes outside the allowlist');
 
 SELECT is(
   (SELECT pg_temp.archive_key('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g3', 'MEDIA_PROVIDER_ERROR')),
@@ -514,13 +531,13 @@ SELECT is((SELECT status FROM public.media_generation_jobs
 
 SELECT throws_ok(
   $$SELECT pg_temp.skip_key('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g4', 'again')$$,
-  'P3M02', 'K4: skipping a terminal job rejected');
+  'P3M02', 'MEDIA_JOB_ALREADY_TERMINAL', 'K4: skipping a terminal job rejected');
 
 -- --- T: cross-org denial -----------------------------------------------------------------
 
 SELECT throws_ok(
   $$SELECT pg_temp.enq('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000b1'::uuid, 'x1')$$,
-  'P3M13', 'T1: member of A cannot enqueue for B');
+  'P3M13', 'MEDIA_TENANT_MISMATCH', 'T1: member of A cannot enqueue for B');
 
 SELECT is((SELECT count(*)::int FROM public.media_generation_jobs
            WHERE organization_id = 'aaaaaaaa-7c11-0000-0000-0000000000b1'::uuid),
@@ -547,7 +564,7 @@ SELECT lives_ok(
 
 SELECT throws_ok(
   $$SELECT pg_temp.enq('11111111-7c11-0000-0000-0000000000c1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000c1'::uuid, 'c1')$$,
-  'P3M10', 'F1: enqueue with the flag off is rejected');
+  'P3M10', 'MEDIA_FEATURE_DISABLED', 'F1: enqueue with the flag off is rejected');
 
 -- --- G: grants ---------------------------------------------------------------------------------
 
@@ -603,15 +620,15 @@ SELECT lives_ok(
 
 SELECT throws_ok(
   $$SELECT * FROM public.enqueue_media_job('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'image', 'A different prompt', '{}'::jsonb, 'i1')$$,
-  'P3M14', 'I2: same key with a different prompt raises MEDIA_IDEMPOTENCY_CONFLICT');
+  'P3M14', 'MEDIA_IDEMPOTENCY_CONFLICT', 'I2: same key with a different prompt raises MEDIA_IDEMPOTENCY_CONFLICT');
 
 SELECT throws_ok(
   $$SELECT * FROM public.enqueue_media_job('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'video', 'Un cartel para la clínica', '{}'::jsonb, 'i1')$$,
-  'P3M14', 'I3: same key with a different kind raises MEDIA_IDEMPOTENCY_CONFLICT');
+  'P3M14', 'MEDIA_IDEMPOTENCY_CONFLICT', 'I3: same key with a different kind raises MEDIA_IDEMPOTENCY_CONFLICT');
 
 SELECT throws_ok(
   $$SELECT * FROM public.enqueue_media_job('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'image', 'Un cartel para la clínica', '{"lane":"quality"}'::jsonb, 'i1')$$,
-  'P3M14', 'I4: same key with different params raises MEDIA_IDEMPOTENCY_CONFLICT');
+  'P3M14', 'MEDIA_IDEMPOTENCY_CONFLICT', 'I4: same key with different params raises MEDIA_IDEMPOTENCY_CONFLICT');
 
 -- Positive control: an identical resubmit still returns the existing job.
 CREATE TEMP TABLE _i1 ON COMMIT DROP AS
@@ -645,17 +662,17 @@ WHERE organization_id = 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid AND idempot
 SELECT throws_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r1',
     'aaaaaaaa-7c11-0000-0000-0000000000b1/' || (SELECT job_id FROM _r1) || '.png')$$,
-  'P3M15', 'R4: path naming another org rejected');
+  'P3M15', 'MEDIA_RESULT_PATH_MISMATCH', 'R4: path naming another org rejected');
 
 SELECT throws_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r1',
     'aaaaaaaa-7c11-0000-0000-0000000000a1/00000000-0000-0000-0000-000000000000.png')$$,
-  'P3M15', 'R5: path naming another job rejected');
+  'P3M15', 'MEDIA_RESULT_PATH_MISMATCH', 'R5: path naming another job rejected');
 
 SELECT throws_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r1',
     'media/aaaaaaaa-7c11-0000-0000-0000000000a1/' || (SELECT job_id FROM _r1) || '.png')$$,
-  'P3M15', 'R6: bucket-prefixed legacy shape rejected');
+  'P3M15', 'MEDIA_RESULT_PATH_MISMATCH', 'R6: bucket-prefixed legacy shape rejected');
 
 SELECT lives_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r1',
@@ -687,7 +704,7 @@ WHERE organization_id = 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid AND idempot
 SELECT throws_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r2',
     'aaaaaaaa-7c11-0000-0000-0000000000a1/' || (SELECT job_id FROM _r2) || '.png')$$,
-  'P3M15', 'R12: video job completed with .png rejected');
+  'P3M15', 'MEDIA_RESULT_PATH_MISMATCH', 'R12: video job completed with .png rejected');
 
 SELECT lives_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r2',
@@ -712,7 +729,7 @@ WHERE organization_id = 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid AND idempot
 SELECT throws_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r3',
     'aaaaaaaa-7c11-0000-0000-0000000000a1/' || (SELECT job_id FROM _r3) || '.mp4')$$,
-  'P3M15', 'R17: image job completed with .mp4 rejected');
+  'P3M15', 'MEDIA_RESULT_PATH_MISMATCH', 'R17: image job completed with .mp4 rejected');
 
 SELECT lives_ok(
   $$SELECT pg_temp.complete_path('aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'r3',
