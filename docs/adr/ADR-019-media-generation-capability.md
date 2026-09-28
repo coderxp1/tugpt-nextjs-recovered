@@ -2,8 +2,9 @@
 
 ## Status
 
-**Proposed** — 2026-09-27. Phase A item 1 of the media work programme.
-Proposes amending ADR-015 §4.3/§4.4 — **pending owner confirmation** (see D1).
+**Accepted** — 2026-09-28. Phase A item 1 of the media work programme.
+D1 (self-hosted, open-source-only direction) **confirmed by owner 2026-09-28**,
+amending ADR-015 §4.3/§4.4.
 
 ## Context
 
@@ -38,11 +39,10 @@ non-commercial. It must not appear in any product path, allowlist, or fixture.
 
 ### D1. Self-hosted, open-source only — amending ADR-015 §4.3/§4.4
 
-Image and video generation run on our own GPU, with open-source models only.
-No HeyGen, no hosted image API, no paid per-render vendor — not as configured
-routes, not as fallbacks. **Proposed – pending owner confirmation**: if
-confirmed, this amends ADR-015 §4.3/§4.4, which had named vendor routes for
-these modalities. Until confirmed, D1 is a proposal, not a decision.
+**Confirmed by owner, 2026-09-28.** Image and video generation run on our own
+GPU, with open-source models only. No HeyGen, no hosted image API, no paid
+per-render vendor — not as configured routes, not as fallbacks. This amends
+ADR-015 §4.3/§4.4, which had named vendor routes for these modalities.
 
 The "no single possible provider" rule is then satisfied the way the rule
 intends — by architectural routability, not by a vendor contract: the adapter

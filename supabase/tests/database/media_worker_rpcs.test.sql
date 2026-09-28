@@ -29,19 +29,17 @@
 --      job (I-group); key normalisation is pinned so ' k' and 'k' are the
 --      same key (N-group).
 --
--- ON THE CONCURRENCY TEST. pgTAP here is single-session and dblink is
--- available in neither the local harness (plain PostgreSQL, no pgmq
--- either) nor by default on the Supabase stack CI runs. A true
--- two-session interleaving therefore cannot be expressed in this suite.
--- What IS tested, serially: two enqueue calls for the same org, the second
--- rejected with P3M09 (D2), plus the idempotency-race branch of the
--- EXCEPTION handler. The actual race-safety comes from the guard itself —
--- a non-deferrable partial unique index, whose per-row check is atomic in
--- PostgreSQL by construction — so the serialized test pins the only part
--- this layer owns: the mapping of unique_violation to
--- MEDIA_CONCURRENCY_EXCEEDED. TODO: if dblink is ever enabled in the CI
--- database, add a genuine two-session interleaving test that holds the
--- first transaction open across the second call.
+-- ON THE CONCURRENCY TESTS. D1 is the serialized pin: two enqueue calls
+-- for the same org, the second rejected with P3M09 — it pins the mapping
+-- of unique_violation to MEDIA_CONCURRENCY_EXCEEDED, the only part of the
+-- guard this layer owns. D3 is the genuine article: two dblink sessions
+-- hold uncommitted enqueues on the same org at the same time, and the
+-- non-deferrable partial unique index admits exactly one winner. D3 needs
+-- a dblink self-connection over the unix socket (CREATE EXTENSION runs
+-- just below, as the postgres superuser, outside the test transaction).
+-- Where the environment cannot provide the self-connection, D3a..D3d SKIP
+-- with a diagnostic instead of failing — a skipped race test is reported,
+-- never silent.
 --
 -- ON THE FIXTURE TRAP (see transcription_worker_rpcs.test.sql): every
 -- "returns nothing / throws" is paired with a control proving the same
@@ -52,8 +50,12 @@
 -- reconciles attempts to PGMQ's read_ct, and a second attempts-incrementing
 -- RPC would double-count. W4 pins the absence.
 
+-- dblink powers the genuine two-session race test (D3). It must be created
+-- outside the test transaction below, as the superuser the suite runs as.
+CREATE EXTENSION IF NOT EXISTS dblink;
+
 BEGIN;
-SELECT plan(76);
+SELECT plan(80);
 
 -- --- Fixtures --------------------------------------------------------------
 
@@ -271,6 +273,157 @@ SELECT is((SELECT created_by FROM public.media_generation_jobs
 SELECT lives_ok(
   $$SELECT pg_temp.enq('11111111-7c11-0000-0000-0000000000a1'::uuid, 'aaaaaaaa-7c11-0000-0000-0000000000a1'::uuid, 'g2')$$,
   'D2: enqueue succeeds after the previous job completed');
+
+-- --- D3: genuine two-session race -------------------------------------------------
+--
+-- D1 pins the serialized mapping; D3 pins the property the mapping exists
+-- for. Two dblink sessions hold uncommitted enqueues on the same org at
+-- the same time; the non-deferrable partial unique index admits exactly
+-- one winner.
+--
+-- Orchestration:
+--   1. setup session: org D (+ owner, flag on), COMMIT — visible to all.
+--   2. session A: BEGIN; enqueue(org D, key 'race-a') -> job_a, msg_a.
+--      A holds its transaction OPEN (uncommitted).
+--   3. session B: BEGIN; enqueue(org D, key 'race-b') sent ASYNC. B's INSERT
+--      blocks on the unique index behind A's uncommitted row. (Async: a
+--      synchronous call would deadlock the orchestrating session.)
+--   4. session A: COMMIT. B's INSERT is released, meets the now-committed
+--      duplicate, raises unique_violation, which the RPC maps to P3M09.
+--   5. record: B's SQLSTATE, active-job count for org D, the survivor's id.
+--   6. cleanup: A's queue message, job row, and org D fixtures, so the
+--      groups below see exactly the state the serialized tests left.
+--
+-- Determinism: B's query is issued only after A's enqueue has returned, so
+-- every interleaving ends with B losing on the index — B's INSERT either
+-- blocks-then-fails (before A's COMMIT) or fails at once (after). The
+-- pg_sleep only widens the overlap window; it does not decide the outcome.
+
+CREATE OR REPLACE FUNCTION pg_temp.race_connstr() RETURNS TEXT
+LANGUAGE sql STABLE AS $$
+  -- No host: libpq defaults to the unix socket, i.e. this same server.
+  SELECT format('dbname=%s', current_database())
+$$;
+
+CREATE TEMP TABLE _race_env(avail BOOLEAN);
+CREATE TEMP TABLE _race_out(
+  a_job UUID, a_msg BIGINT, b_sqlstate TEXT, active_ct INT, survivor UUID
+);
+
+DO $$
+DECLARE
+  v_conn TEXT := pg_temp.race_connstr();
+BEGIN
+  BEGIN
+    PERFORM dblink_connect('race_probe', v_conn);
+    PERFORM dblink_disconnect('race_probe');
+    INSERT INTO _race_env VALUES (true);
+  EXCEPTION WHEN OTHERS THEN
+    INSERT INTO _race_env VALUES (false);
+  END;
+END $$;
+
+SELECT diag('D3 genuine race: dblink self-connection ' ||
+  CASE WHEN (SELECT avail FROM _race_env) THEN 'available'
+       ELSE 'UNAVAILABLE — D3a..D3d will skip' END);
+
+SELECT skip('D3: dblink self-connection unavailable in this environment', 4)
+WHERE NOT (SELECT avail FROM _race_env);
+
+DO $$
+DECLARE
+  v_conn TEXT := pg_temp.race_connstr();
+  v_org  UUID := 'aaaaaaaa-7c11-0000-0000-0000000000d1';
+  v_user UUID := '11111111-7c11-0000-0000-0000000000d1';
+  v_a_job UUID;
+  v_a_msg BIGINT;
+  v_b_sqlstate TEXT := 'NO_ERROR';
+  v_active INT;
+  v_survivor UUID;
+BEGIN
+  IF NOT (SELECT avail FROM _race_env) THEN RETURN; END IF;
+
+  -- 1. Committed fixtures for org D, via their own session (this session's
+  --    own inserts are uncommitted and invisible to the race sessions).
+  PERFORM dblink_connect('race_setup', v_conn);
+  PERFORM dblink_exec('race_setup', 'BEGIN');
+  PERFORM dblink_exec('race_setup', format(
+    $$INSERT INTO public.organizations(id,name,slug)
+      VALUES ('%s','Race Org D','race-org-d')$$, v_org));
+  PERFORM dblink_exec('race_setup', format(
+    $$INSERT INTO public.profiles(id,email)
+      VALUES ('%s','race-d@example.com')$$, v_user));
+  PERFORM dblink_exec('race_setup', format(
+    $$INSERT INTO public.organization_members(organization_id,user_id,role)
+      VALUES ('%s','%s','owner')$$, v_org, v_user));
+  PERFORM dblink_exec('race_setup', format(
+    $$INSERT INTO public.feature_flags(organization_id,key,is_enabled)
+      VALUES ('%s','media_generation',true)$$, v_org));
+  PERFORM dblink_exec('race_setup', 'COMMIT');
+  PERFORM dblink_disconnect('race_setup');
+
+  -- 2. Session A enqueues and HOLDS its transaction open.
+  PERFORM dblink_connect('race_a', v_conn);
+  PERFORM dblink_exec('race_a', 'BEGIN');
+  SELECT j.job_id, j.pgmq_msg_id INTO v_a_job, v_a_msg
+  FROM dblink('race_a', format(
+    $$SELECT job_id, pgmq_msg_id FROM public.enqueue_media_job('%s','%s','image','Un cartel','{}'::jsonb,'race-a')$$,
+    v_user, v_org)) AS j(job_id UUID, pgmq_msg_id BIGINT);
+
+  -- 3. Session B enqueues ASYNC — blocks on the index behind A's row.
+  PERFORM dblink_connect('race_b', v_conn);
+  PERFORM dblink_exec('race_b', 'BEGIN');
+  PERFORM dblink_send_query('race_b', format(
+    $$SELECT job_id FROM public.enqueue_media_job('%s','%s','image','Un cartel','{}'::jsonb,'race-b')$$,
+    v_user, v_org));
+  PERFORM pg_sleep(0.5);
+
+  -- 4. A commits; B's INSERT is released and loses on the index.
+  PERFORM dblink_exec('race_a', 'COMMIT');
+  BEGIN
+    PERFORM dblink_get_result('race_b');
+  EXCEPTION WHEN OTHERS THEN
+    v_b_sqlstate := SQLSTATE;
+  END;
+  PERFORM dblink_exec('race_b', 'ROLLBACK');
+  PERFORM dblink_disconnect('race_a');
+  PERFORM dblink_disconnect('race_b');
+
+  -- 5. Record the race outcome (A's row is committed; B's rolled back).
+  SELECT count(*)::int INTO v_active
+  FROM public.media_generation_jobs
+  WHERE organization_id = v_org AND status IN ('queued','processing');
+  SELECT id INTO v_survivor
+  FROM public.media_generation_jobs
+  WHERE organization_id = v_org AND status IN ('queued','processing')
+  LIMIT 1;
+  INSERT INTO _race_out VALUES (v_a_job, v_a_msg, v_b_sqlstate, v_active, v_survivor);
+
+  -- 6. Cleanup so later groups see the pre-race state.
+  PERFORM pgmq.delete('media_jobs', v_a_msg);
+  DELETE FROM public.media_generation_jobs WHERE organization_id = v_org;
+  DELETE FROM public.feature_flags WHERE organization_id = v_org AND key = 'media_generation';
+  DELETE FROM public.organization_members WHERE organization_id = v_org;
+  DELETE FROM public.profiles WHERE id = v_user;
+  DELETE FROM public.organizations WHERE id = v_org;
+END $$;
+
+SELECT is((SELECT b_sqlstate FROM _race_out), 'P3M09',
+          'D3a: loser of the genuine two-session race gets P3M09')
+WHERE (SELECT avail FROM _race_env);
+
+SELECT is((SELECT active_ct FROM _race_out), 1,
+          'D3b: exactly one job survives the race')
+WHERE (SELECT avail FROM _race_env);
+
+SELECT is((SELECT survivor FROM _race_out), (SELECT a_job FROM _race_out),
+          'D3c: the survivor is the session that committed first')
+WHERE (SELECT avail FROM _race_env);
+
+SELECT is((SELECT count(*)::int FROM public.media_generation_jobs
+           WHERE idempotency_key = 'race-b'), 0,
+          'D3d: the loser''s job row never materialized')
+WHERE (SELECT avail FROM _race_env);
 
 -- --- X: cancellation ---------------------------------------------------------------
 
