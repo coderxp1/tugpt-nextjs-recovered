@@ -73,7 +73,7 @@ export class ComfyUIAdapter {
       if (!res.ok) {
         throw ProviderError.fromHttpStatus(this.providerName, res.status, 'object_info check failed');
       }
-      const data = (await res.json()) as Record<string, any>;
+      const data = (await res.json()) as Record<string, { input?: { required?: Record<string, [string[]]> } }>;
       const requiredNodes = [
         'UNETLoader',
         'CheckpointLoaderSimple',
@@ -527,7 +527,7 @@ export class ComfyUIAdapter {
           }
         }
 
-      } catch (err: unknown) {
+      } catch {
         if (signal?.aborted) break;
       }
 
