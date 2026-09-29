@@ -2,14 +2,14 @@
  * @file comfyui.ts
  * @description Dedicated ComfyUI provider adapter for TuGPT media generation.
  *
- * Implements local open-weights image (FLUX.1 schnell) and video (WAN 2.2 14B / Lightning LoRA)
- * generation over ComfyUI's REST API.
+ * Implements local open-weights image (FLUX.1 schnell) and video (WAN 2.2 14B two-stage
+ * high-/low-noise pipeline) generation over ComfyUI's REST API.
  *
  * GOVERNANCE AND INVARIANTS (ADR-019 & Review 07/08):
  * 1. Loopback / Internal Network only: Connects to ComfyUI over internal network (default http://comfyui:8188).
  * 2. Parameter Allowlist & Typed Payloads: Callers submit typed requests, never raw workflow graphs.
  * 3. Parameter bounds: Fixed resolutions (1280x720, 720x1280, 832x480 for video; 1024x1024 for image);
- *    prompt <= 1000 chars; steps fixed per lane (4 for default Lightning / schnell, 20 for quality WAN).
+ *    prompt <= 1000 chars; steps fixed per lane (4 for lightning / schnell, 20 for quality WAN).
  * 4. Output retrieval: Fetches output via GET /view?filename=... using metadata returned by /history.
  * 5. Interrupt/Cancel Mapping: Distinguishes execution_interrupted (CANCELLED) from execution_error (FAILED).
  */
@@ -17,7 +17,7 @@
 import { ProviderError } from './errors.js';
 
 export type MediaDomain = 'image' | 'video';
-export type MediaLane = 'default' | 'quality';
+export type MediaLane = 'lightning' | 'quality';
 
 export interface MediaGenerationRequest {
   readonly organizationId: string;
@@ -78,8 +78,15 @@ export class ComfyUIAdapter {
         'UNETLoader',
         'CheckpointLoaderSimple',
         'CLIPLoader',
+        'CLIPTextEncode',
         'VAELoader',
+        'VAEDecode',
         'LoraLoaderModelOnly',
+        'ModelSamplingSD3',
+        'EmptyHunyuanLatentVideo',
+        'KSamplerAdvanced',
+        'CreateVideo',
+        'SaveVideo',
       ];
       for (const node of requiredNodes) {
         if (!data[node]) {
@@ -96,9 +103,11 @@ export class ComfyUIAdapter {
       const requiredModelChecks: Array<{ node: string; param: string; expectedModel: string }> = [
         { node: 'CheckpointLoaderSimple', param: 'ckpt_name', expectedModel: 'flux1-schnell-fp8.safetensors' },
         { node: 'UNETLoader', param: 'unet_name', expectedModel: 'wan2.2_t2v_high_noise_14B_fp16.safetensors' },
+        { node: 'UNETLoader', param: 'unet_name', expectedModel: 'wan2.2_t2v_low_noise_14B_fp16.safetensors' },
         { node: 'CLIPLoader', param: 'clip_name', expectedModel: 'umt5_xxl_fp16.safetensors' },
         { node: 'VAELoader', param: 'vae_name', expectedModel: 'wan_2.1_vae.safetensors' },
         { node: 'LoraLoaderModelOnly', param: 'lora_name', expectedModel: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors' },
+        { node: 'LoraLoaderModelOnly', param: 'lora_name', expectedModel: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors' },
       ];
 
       for (const check of requiredModelChecks) {
@@ -152,7 +161,7 @@ export class ComfyUIAdapter {
    * Build workflow graph JSON for the requested domain & lane.
    */
   buildWorkflowGraph(req: MediaGenerationRequest): Record<string, unknown> {
-    const lane = req.lane || 'default';
+    const lane = req.lane || 'lightning';
     const seed = req.seed ?? Math.floor(Math.random() * 1000000);
     const subfolderPrefix = `${req.organizationId}/${req.jobId}`;
 
@@ -219,85 +228,30 @@ export class ComfyUIAdapter {
       };
     }
 
-    // Video domain: WAN 2.2
-    if (lane === 'default') {
-      // WAN 2.2 14B + Lightning LoRA (4 steps)
-      return {
-        '1': {
-          inputs: {
-            unet_name: 'wan2.2_t2v_high_noise_14B_fp16.safetensors',
-            weight_dtype: 'default',
-          },
-          class_type: 'UNETLoader',
-        },
-        '2': {
-          inputs: {
-            model: ['1', 0],
-            lora_name: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors',
-            strength_model: 1.0,
-          },
-          class_type: 'LoraLoaderModelOnly',
-        },
-        '3': {
-          inputs: {
-            clip_name: 'umt5_xxl_fp16.safetensors',
-            type: 'wan',
-          },
-          class_type: 'CLIPLoader',
-        },
-        '4': {
-          inputs: {
-            vae_name: 'wan_2.1_vae.safetensors',
-          },
-          class_type: 'VAELoader',
-        },
-        '5': {
-          inputs: {
-            text: req.prompt,
-            clip: ['3', 0],
-          },
-          class_type: 'CLIPTextEncode',
-        },
-        '6': {
-          inputs: {
-            width: req.width || 1280,
-            height: req.height || 720,
-            length: req.frames || 81,
-            batch_size: 1,
-          },
-          class_type: 'EmptyWanLatentVideo',
-        },
-        '7': {
-          inputs: {
-            seed,
-            steps: 4,
-            cfg: 1.0,
-            shift: 5.0,
-            model: ['2', 0],
-            positive: ['5', 0],
-            latent_image: ['6', 0],
-          },
-          class_type: 'WanSampler',
-        },
-        '8': {
-          inputs: {
-            samples: ['7', 0],
-            vae: ['4', 0],
-          },
-          class_type: 'VAEDecode',
-        },
-        '9': {
-          inputs: {
-            filename_prefix: subfolderPrefix,
-            fps: req.fps || 16,
-            images: ['8', 0],
-          },
-          class_type: 'SaveAnimatedMP4',
-        },
-      };
+    if (lane !== 'lightning' && lane !== 'quality') {
+      throw new ProviderError(
+        this.providerName,
+        'INVALID_REQUEST',
+        400,
+        `Unknown media lane '${req.lane}': expected 'lightning' or 'quality'`
+      );
     }
 
-    // Quality Video lane: WAN 2.2 14B (20 steps, no LoRA)
+    // Video domain: WAN 2.2 — two-stage high-noise -> low-noise pipeline.
+    // Reference: apps/worker/tests/fixtures/comfyui/test-wan-lightning.json
+    // (recorded working workflow). Stage 1 (KSamplerAdvanced '10') denoises with
+    // the high-noise UNet for the first half of the steps and returns the latent
+    // with leftover noise; stage 2 ('11') continues from that latent with the
+    // low-noise UNet without adding noise. VAE decode -> CreateVideo ->
+    // SaveVideo (mp4/h264) completes the graph.
+    const useLora = lane === 'lightning'; // Lightning 4-step LoRAs; quality lane uses bare UNets
+    const steps = useLora ? 4 : 20;
+    const cfg = useLora ? 1.0 : 3.5;
+    const shift = useLora ? 5.0 : 8.0;
+    const stageSplit = Math.floor(steps / 2);
+    const highModelRef = useLora ? '1L' : '1';
+    const lowModelRef = useLora ? '2L' : '2';
+
     return {
       '1': {
         inputs: {
@@ -306,61 +260,146 @@ export class ComfyUIAdapter {
         },
         class_type: 'UNETLoader',
       },
+      ...(useLora
+        ? {
+            '1L': {
+              inputs: {
+                model: ['1', 0],
+                lora_name: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors',
+                strength_model: 1.0,
+              },
+              class_type: 'LoraLoaderModelOnly',
+            },
+          }
+        : {}),
       '2': {
+        inputs: {
+          unet_name: 'wan2.2_t2v_low_noise_14B_fp16.safetensors',
+          weight_dtype: 'default',
+        },
+        class_type: 'UNETLoader',
+      },
+      ...(useLora
+        ? {
+            '2L': {
+              inputs: {
+                model: ['2', 0],
+                lora_name: 'wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors',
+                strength_model: 1.0,
+              },
+              class_type: 'LoraLoaderModelOnly',
+            },
+          }
+        : {}),
+      '3': {
         inputs: {
           clip_name: 'umt5_xxl_fp16.safetensors',
           type: 'wan',
+          device: 'default',
         },
         class_type: 'CLIPLoader',
       },
-      '3': {
+      '4': {
         inputs: {
           vae_name: 'wan_2.1_vae.safetensors',
         },
         class_type: 'VAELoader',
       },
-      '4': {
+      '5': {
         inputs: {
           text: req.prompt,
-          clip: ['2', 0],
+          clip: ['3', 0],
         },
         class_type: 'CLIPTextEncode',
       },
-      '5': {
+      '6': {
+        inputs: {
+          text: req.negativePrompt || 'blurry, distorted, low quality, static, watermark',
+          clip: ['3', 0],
+        },
+        class_type: 'CLIPTextEncode',
+      },
+      '7': {
+        inputs: {
+          model: [highModelRef, 0],
+          shift,
+        },
+        class_type: 'ModelSamplingSD3',
+      },
+      '8': {
+        inputs: {
+          model: [lowModelRef, 0],
+          shift,
+        },
+        class_type: 'ModelSamplingSD3',
+      },
+      '9': {
         inputs: {
           width: req.width || 1280,
           height: req.height || 720,
           length: req.frames || 81,
           batch_size: 1,
         },
-        class_type: 'EmptyWanLatentVideo',
+        class_type: 'EmptyHunyuanLatentVideo',
       },
-      '6': {
+      '10': {
         inputs: {
-          seed,
-          steps: 20,
-          cfg: 3.5,
-          shift: 8.0,
-          model: ['1', 0],
-          positive: ['4', 0],
-          latent_image: ['5', 0],
+          model: ['7', 0],
+          add_noise: 'enable',
+          noise_seed: seed,
+          steps,
+          cfg,
+          sampler_name: 'euler',
+          scheduler: 'simple',
+          positive: ['5', 0],
+          negative: ['6', 0],
+          latent_image: ['9', 0],
+          start_at_step: 0,
+          end_at_step: stageSplit,
+          return_with_leftover_noise: 'enable',
         },
-        class_type: 'WanSampler',
+        class_type: 'KSamplerAdvanced',
       },
-      '7': {
+      '11': {
         inputs: {
-          samples: ['6', 0],
-          vae: ['3', 0],
+          model: ['8', 0],
+          add_noise: 'disable',
+          noise_seed: 0,
+          steps,
+          cfg,
+          sampler_name: 'euler',
+          scheduler: 'simple',
+          positive: ['5', 0],
+          negative: ['6', 0],
+          latent_image: ['10', 0],
+          start_at_step: stageSplit,
+          end_at_step: 10000,
+          return_with_leftover_noise: 'disable',
+        },
+        class_type: 'KSamplerAdvanced',
+      },
+      '12': {
+        inputs: {
+          samples: ['11', 0],
+          vae: ['4', 0],
         },
         class_type: 'VAEDecode',
       },
-      '8': {
+      '13': {
         inputs: {
-          filename_prefix: subfolderPrefix,
+          images: ['12', 0],
           fps: req.fps || 16,
-          images: ['7', 0],
         },
-        class_type: 'SaveAnimatedMP4',
+        class_type: 'CreateVideo',
+      },
+      '14': {
+        inputs: {
+          video: ['13', 0],
+          filename_prefix: subfolderPrefix,
+          format: 'mp4',
+          codec: 'h264',
+        },
+        class_type: 'SaveVideo',
       },
     };
   }

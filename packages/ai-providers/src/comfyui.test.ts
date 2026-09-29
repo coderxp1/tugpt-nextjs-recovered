@@ -15,6 +15,9 @@ const objectInfoFixture = JSON.parse(readFileSync(path.join(FIXTURES_DIR, 'objec
 const historyImageFixture = JSON.parse(readFileSync(path.join(FIXTURES_DIR, 'history-image-complete.json'), 'utf8'));
 const historyVideoFixture = JSON.parse(readFileSync(path.join(FIXTURES_DIR, 'history-video-complete.json'), 'utf8'));
 const historyInterruptedFixture = JSON.parse(readFileSync(path.join(FIXTURES_DIR, 'history-interrupted.json'), 'utf8'));
+// Recorded working workflow (reconstructed from the GPU-host command; verify byte-for-byte
+// against /srv/ai/comfyui/test-wan-lightning.json once host access is approved).
+const wanLightningReference = JSON.parse(readFileSync(path.join(FIXTURES_DIR, 'test-wan-lightning.json'), 'utf8')).prompt;
 
 describe('ComfyUIAdapter', () => {
   let fetchMock: ReturnType<typeof vi.fn>;
@@ -191,7 +194,7 @@ describe('ComfyUIAdapter', () => {
       expect(body.prompt['4'].inputs.ckpt_name).toBe('flux1-schnell-fp8.safetensors');
     });
 
-    it('submits default video prompt successfully using Lightning LoRA and 4 steps', async () => {
+    it('submits lightning video prompt using the two-stage graph (4 steps, LoRAs)', async () => {
       fetchMock.mockResolvedValueOnce(
         new Response(JSON.stringify({ prompt_id: 'prompt-video-uuid-2002' }), {
           status: 200,
@@ -203,7 +206,7 @@ describe('ComfyUIAdapter', () => {
         organizationId: 'org-test-123',
         jobId: 'job-vid-789',
         domain: 'video',
-        lane: 'default',
+        lane: 'lightning',
         prompt: 'A dramatic cinematic landscape with stormy sky',
         seed: 12345,
       });
@@ -211,12 +214,89 @@ describe('ComfyUIAdapter', () => {
       expect(res.promptId).toBe('prompt-video-uuid-2002');
 
       const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-      expect(body.prompt['9'].inputs.filename_prefix).toBe('org-test-123/job-vid-789');
-      expect(body.prompt['7'].inputs.steps).toBe(4);
-      expect(body.prompt['2'].inputs.lora_name).toContain('wan2.2_t2v_lightx2v_4steps_lora');
+      const graph = body.prompt;
+      // Both UNets with their matching Lightning LoRAs.
+      expect(graph['1'].inputs.unet_name).toBe('wan2.2_t2v_high_noise_14B_fp16.safetensors');
+      expect(graph['1L'].inputs.lora_name).toBe('wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors');
+      expect(graph['2'].inputs.unet_name).toBe('wan2.2_t2v_low_noise_14B_fp16.safetensors');
+      expect(graph['2L'].inputs.lora_name).toBe('wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors');
+      // Two KSamplerAdvanced stages, 4 steps each.
+      expect(graph['10'].class_type).toBe('KSamplerAdvanced');
+      expect(graph['10'].inputs.steps).toBe(4);
+      expect(graph['11'].class_type).toBe('KSamplerAdvanced');
+      expect(graph['11'].inputs.steps).toBe(4);
+      // Output chain ends in SaveVideo mp4/h264 with the org/job prefix.
+      expect(graph['14'].inputs.filename_prefix).toBe('org-test-123/job-vid-789');
+      expect(graph['14'].inputs.format).toBe('mp4');
     });
 
-    it('submits quality video prompt successfully using 20 steps and no LoRA', async () => {
+    it('builds a two-stage high/low-noise graph matching the recorded reference structure', async () => {
+      fetchMock.mockResolvedValueOnce(
+        new Response(JSON.stringify({ prompt_id: 'prompt-video-uuid-2003' }), {
+          status: 200,
+          headers: { 'Content-Type': 'application/json' },
+        })
+      );
+
+      await adapter.submitPrompt({
+        organizationId: 'org-test-123',
+        jobId: 'job-vid-ref',
+        domain: 'video',
+        lane: 'lightning',
+        prompt: 'A dramatic cinematic landscape with stormy sky',
+        seed: 42,
+      });
+
+      const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
+      const graph = body.prompt;
+
+      // Every reference node id exists with the same class_type.
+      for (const nodeId of Object.keys(wanLightningReference)) {
+        expect(graph[nodeId], `node ${nodeId} missing from built graph`).toBeDefined();
+        expect(graph[nodeId].class_type).toBe(wanLightningReference[nodeId].class_type);
+      }
+
+      // High-noise stage: samples from the empty latent, returns leftover noise.
+      const stage1 = graph['10'].inputs;
+      expect(stage1.model).toEqual(['7', 0]); // high-noise branch (ModelSamplingSD3 on 1L)
+      expect(stage1.latent_image).toEqual(['9', 0]);
+      expect(stage1.add_noise).toBe('enable');
+      expect(stage1.start_at_step).toBe(0);
+      expect(stage1.end_at_step).toBe(2);
+      expect(stage1.return_with_leftover_noise).toBe('enable');
+
+      // Low-noise stage: continues from the high-noise stage latent, no new noise.
+      const stage2 = graph['11'].inputs;
+      expect(stage2.model).toEqual(['8', 0]); // low-noise branch (ModelSamplingSD3 on 2L)
+      expect(stage2.latent_image).toEqual(['10', 0]);
+      expect(stage2.add_noise).toBe('disable');
+      expect(stage2.start_at_step).toBe(2);
+      expect(stage2.return_with_leftover_noise).toBe('disable');
+
+      // Decode -> CreateVideo -> SaveVideo chain.
+      expect(graph['12'].inputs.samples).toEqual(['11', 0]);
+      expect(graph['13'].class_type).toBe('CreateVideo');
+      expect(graph['13'].inputs.images).toEqual(['12', 0]);
+      expect(graph['13'].inputs.fps).toBe(16);
+      expect(graph['14'].class_type).toBe('SaveVideo');
+      expect(graph['14'].inputs.video).toEqual(['13', 0]);
+      expect(graph['14'].inputs.format).toBe('mp4');
+      expect(graph['14'].inputs.codec).toBe('h264');
+    });
+
+    it('rejects an unknown lane value with INVALID_REQUEST', async () => {
+      await expect(
+        adapter.submitPrompt({
+          organizationId: 'org-1',
+          jobId: 'job-1',
+          domain: 'video',
+          lane: 'default' as 'lightning',
+          prompt: 'ocean waves',
+        })
+      ).rejects.toThrow(ProviderError);
+    });
+
+    it('submits quality video prompt using the two-stage graph with 20 steps and no LoRA', async () => {
       fetchMock.mockResolvedValueOnce(
         new Response(JSON.stringify({ prompt_id: 'prompt-video-uuid-2002' }), {
           status: 200,
@@ -235,8 +315,19 @@ describe('ComfyUIAdapter', () => {
       expect(res.promptId).toBe('prompt-video-uuid-2002');
 
       const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-      expect(body.prompt['6'].inputs.steps).toBe(20);
-      expect(body.prompt['2'].class_type).toBe('CLIPLoader'); // No LoraLoaderModelOnly in quality lane
+      const graph = body.prompt;
+      // No LoRA nodes on the quality lane; ModelSamplingSD3 sits directly on the UNets.
+      expect(graph['1L']).toBeUndefined();
+      expect(graph['2L']).toBeUndefined();
+      expect(graph['7'].inputs.model).toEqual(['1', 0]);
+      expect(graph['8'].inputs.model).toEqual(['2', 0]);
+      // Two stages of 10 steps each: 0->10 high-noise, 10->end low-noise.
+      expect(graph['10'].inputs.steps).toBe(20);
+      expect(graph['10'].inputs.start_at_step).toBe(0);
+      expect(graph['10'].inputs.end_at_step).toBe(10);
+      expect(graph['11'].inputs.start_at_step).toBe(10);
+      expect(graph['11'].inputs.latent_image).toEqual(['10', 0]);
+      expect(graph['14'].class_type).toBe('SaveVideo');
     });
   });
 

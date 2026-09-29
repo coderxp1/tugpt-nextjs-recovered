@@ -93,7 +93,7 @@ export class MediaWorker {
         organizationId,
         jobId: mediaJobId,
         domain: kind,
-        lane: (params.lane as 'default' | 'quality') || 'default',
+        lane: (params.lane as 'lightning' | 'quality') || 'lightning',
         prompt,
         width: params.width as number | undefined,
         height: params.height as number | undefined,
