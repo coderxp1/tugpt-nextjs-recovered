@@ -2,7 +2,7 @@
 
 **Status:** active
 **Gate:** CI job `database-tests` in `.github/workflows/ci.yml`
-**Files:** <!-- database-tests-count:start -->`supabase/tests/database/*.sql` — 38 files<!-- database-tests-count:end -->, ~800 pgTAP assertions
+**Files:** <!-- database-tests-count:start -->`supabase/tests/database/*.sql` — 39 files<!-- database-tests-count:end -->, ~800 pgTAP assertions
 
 ## Why this document exists
 
