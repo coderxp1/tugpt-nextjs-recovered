@@ -656,13 +656,41 @@ SELECT throws_ok(
 
 CREATE EXTENSION IF NOT EXISTS dblink;
 
+-- Self-connection for the genuine two-session race. Tries the unix socket
+-- first, then TCP loopback on the server's own port: under
+-- `supabase test db` (CI and local) the test session arrives over TCP and
+-- the unix-socket self-connection is unavailable, so the probe falls through
+-- to TCP. The last resort uses the documented Supabase local default
+-- credentials (postgres/postgres). Returns NULL when nothing works; the diag
+-- below then prints the actual libpq error instead of silently skipping.
 CREATE OR REPLACE FUNCTION pg_temp.race_connstr() RETURNS TEXT
-LANGUAGE sql STABLE AS $$
-  -- No host: libpq defaults to the unix socket, i.e. this same server.
-  SELECT format('dbname=%s', current_database())
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+  c TEXT;
+BEGIN
+  FOR c IN
+    SELECT unnest(ARRAY[
+      format('dbname=%s', current_database()),
+      format('host=/var/run/postgresql dbname=%s', current_database()),
+      format('host=localhost port=%s dbname=%s',
+             current_setting('port'), current_database()),
+      format('host=localhost port=%s dbname=%s user=postgres password=postgres',
+             current_setting('port'), current_database())
+    ])
+  LOOP
+    BEGIN
+      PERFORM dblink_connect('qrace_probe', c);
+      PERFORM dblink_disconnect('qrace_probe');
+      RETURN c;
+    EXCEPTION WHEN OTHERS THEN
+      NULL; -- try the next candidate
+    END;
+  END LOOP;
+  RETURN NULL;
+END;
 $$;
 
-CREATE TEMP TABLE _qrace_env(avail BOOLEAN);
+CREATE TEMP TABLE _qrace_env(avail BOOLEAN, detail TEXT);
 CREATE TEMP TABLE _qrace_out(
   b_sqlstate TEXT, job_ct INT, admitted_gpu INT, winner_lane TEXT
 );
@@ -671,18 +699,26 @@ DO $qrace$
 DECLARE
   v_conn TEXT := pg_temp.race_connstr();
 BEGIN
-  BEGIN
-    PERFORM dblink_connect('qrace_probe', v_conn);
+  IF v_conn IS NULL THEN
+    BEGIN
+      -- Capture the concrete reason the last-resort candidate failed.
+      PERFORM dblink_connect('qrace_probe',
+        format('host=localhost port=%s dbname=%s user=postgres password=postgres',
+               current_setting('port'), current_database()));
+    EXCEPTION WHEN OTHERS THEN
+      INSERT INTO _qrace_env VALUES (false, SQLERRM);
+      RETURN;
+    END;
     PERFORM dblink_disconnect('qrace_probe');
-    INSERT INTO _qrace_env VALUES (true);
-  EXCEPTION WHEN OTHERS THEN
-    INSERT INTO _qrace_env VALUES (false);
-  END;
+    INSERT INTO _qrace_env VALUES (false, 'unexpected: last-resort probe connected on retry');
+  ELSE
+    INSERT INTO _qrace_env VALUES (true, v_conn);
+  END IF;
 END $qrace$;
 
 SELECT diag('C genuine race: dblink self-connection ' ||
-  CASE WHEN (SELECT avail FROM _qrace_env) THEN 'available'
-       ELSE 'UNAVAILABLE — C1..C5 will skip' END);
+  CASE WHEN (SELECT avail FROM _qrace_env) THEN 'available via ' || (SELECT detail FROM _qrace_env)
+       ELSE 'UNAVAILABLE — C1..C5 will skip (' || (SELECT detail FROM _qrace_env) || ')' END);
 
 SELECT skip('C: dblink self-connection unavailable in this environment', 5)
 WHERE NOT (SELECT avail FROM _qrace_env);
