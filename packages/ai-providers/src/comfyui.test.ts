@@ -237,7 +237,8 @@ describe('ComfyUIAdapter', () => {
       const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
       expect(body.prompt['10'].inputs.steps).toBe(20);
       expect(body.prompt['11'].inputs.steps).toBe(20);
-      expect(body.prompt['2'].class_type).toBe('CLIPLoader'); // No LoraLoaderModelOnly in quality lane
+      expect(body.prompt['3'].class_type).toBe('CLIPLoader'); // No LoraLoaderModelOnly in quality lane
+      expect(body.prompt['1L']).toBeUndefined();
     });
   });
 
