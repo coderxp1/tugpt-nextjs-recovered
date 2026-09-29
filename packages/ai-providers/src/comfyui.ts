@@ -442,12 +442,12 @@ export class ComfyUIAdapter {
         );
       }
       const frames = req.frames ?? 81;
-      if (frames < 5 || frames > 81 || (frames - 1) % 4 !== 0) {
+      if (frames < 1 || frames > 81 || (frames - 1) % 4 !== 0) {
         throw new ProviderError(
           this.providerName,
           'INVALID_REQUEST',
           400,
-          'Video frames must follow 4n+1 rule between 5 and 81 (e.g. 5, 9, 13, ..., 81)'
+          'Video frames must follow 4n+1 rule between 1 and 81 (e.g. 1, 5, 9, ..., 81)'
         );
       }
       const fps = req.fps ?? 16;

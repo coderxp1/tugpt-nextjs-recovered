@@ -103,8 +103,11 @@ written as its **first implementation**, not as a one-off client.
   `CANCELLED` (with reason); a prompt_id whose history stays empty *and* is
   absent from `/queue` after restart → `FAILED` with a distinct reason, never
   `RUNNING` forever.
-- `POST /interrupt` is never issued globally: the worker interrupts only the
-  prompt it submitted, after confirming that prompt is the one running.
+- Cancellation calls ComfyUI's **global** `POST /interrupt` endpoint — it is
+  not prompt-scoped. The adapter therefore issues it only after a `GET /queue`
+  check confirms the prompt it submitted is the one actively running. A prompt
+  that is still pending is removed with the targeted `POST /queue`
+  (`delete: [prompt_id]`) instead, which has no global side effects.
 
 ### D5. One active job per organisation, enforced by the database
 
