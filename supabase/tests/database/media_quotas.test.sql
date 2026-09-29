@@ -67,18 +67,18 @@ INSERT INTO public.organizations (id, name, slug) VALUES
 
 INSERT INTO auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at, raw_app_meta_data, raw_user_meta_data, is_super_admin, confirmation_token, recovery_token, email_change_token_new, email_change)
 VALUES
-  ('00000000-0000-0000-0000-000000000000','22222201-7c12-0000-000000000001','authenticated','authenticated','quota-a@example.com','','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','{}','{}',false,'','','',''),
-  ('00000000-0000-0000-0000-000000000000','22222202-7c12-0000-000000000002','authenticated','authenticated','quota-b@example.com','','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','{}','{}',false,'','','','')
+  ('00000000-0000-0000-0000-000000000000','22222201-7c12-0000-0000-000000000001','authenticated','authenticated','quota-a@example.com','','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','{}','{}',false,'','','',''),
+  ('00000000-0000-0000-0000-000000000000','22222202-7c12-0000-0000-000000000002','authenticated','authenticated','quota-b@example.com','','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','{}','{}',false,'','','','')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO public.profiles (id, email) VALUES
-  ('22222201-7c12-0000-000000000001', 'quota-a@example.com'),
-  ('22222202-7c12-0000-000000000002', 'quota-b@example.com')
+  ('22222201-7c12-0000-0000-000000000001', 'quota-a@example.com'),
+  ('22222202-7c12-0000-0000-000000000002', 'quota-b@example.com')
 ON CONFLICT (id) DO NOTHING;
 
 INSERT INTO public.organization_members (organization_id, user_id, role) VALUES
-  ('bbbbbb01-7c12-0000-0000-000000000001', '22222201-7c12-0000-000000000001', 'owner'),
-  ('bbbbbb02-7c12-0000-0000-000000000002', '22222202-7c12-0000-000000000002', 'owner');
+  ('bbbbbb01-7c12-0000-0000-000000000001', '22222201-7c12-0000-0000-000000000001', 'owner'),
+  ('bbbbbb02-7c12-0000-0000-000000000002', '22222202-7c12-0000-0000-000000000002', 'owner');
 
 -- --- Helpers ---------------------------------------------------------------
 
@@ -201,10 +201,10 @@ SELECT pg_temp.setquota(2, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed', now());
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed', now());
 
 SELECT throws_ok(
@@ -215,7 +215,7 @@ SELECT throws_ok(
 -- Positive control: one below the cap passes.
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed', now());
 
 SELECT lives_ok(
@@ -226,7 +226,7 @@ SELECT lives_ok(
 SELECT pg_temp.setquota(NULL, NULL, 1, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 
 SELECT throws_ok(
@@ -238,7 +238,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, 1, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 
 SELECT throws_ok(
@@ -250,7 +250,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, 1, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'image', 'image', 'completed', now());
 
 SELECT throws_ok(
@@ -271,7 +271,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob_nolane('bbbbbb01-7c12-0000-0000-000000000001',
-                            '22222201-7c12-0000-000000000001',
+                            '22222201-7c12-0000-0000-000000000001',
                             'completed', now());
 
 SELECT throws_ok(
@@ -285,7 +285,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed', now());
 
 SELECT throws_ok(
@@ -300,7 +300,7 @@ SELECT lives_ok(
 SELECT pg_temp.setquota(NULL, NULL, 1, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 
 SELECT throws_ok(
@@ -316,13 +316,13 @@ SELECT lives_ok(
 SELECT pg_temp.setquota(1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'skipped', now());
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'skipped', now());
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'skipped', now());
 
 SELECT lives_ok(
@@ -335,7 +335,7 @@ SELECT lives_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, 1, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed',
                      date_trunc('month', now()) - interval '1 day');
 
@@ -345,7 +345,7 @@ SELECT lives_ok(
 
 -- But a quality job from this month does.
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 
 SELECT throws_ok(
@@ -357,7 +357,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed',
                      now() - interval '26 hours');
 
@@ -370,13 +370,13 @@ SELECT lives_ok(
 -- Org B has no media_quotas row at all.
 SELECT pg_temp.clearjobs('bbbbbb02-7c12-0000-0000-000000000002');
 SELECT pg_temp.mkjob('bbbbbb02-7c12-0000-0000-000000000002',
-                     '22222202-7c12-0000-000000000002',
+                     '22222202-7c12-0000-0000-000000000002',
                      'video', 'lightning', 'completed', now());
 SELECT pg_temp.mkjob('bbbbbb02-7c12-0000-0000-000000000002',
-                     '22222202-7c12-0000-000000000002',
+                     '22222202-7c12-0000-0000-000000000002',
                      'video', 'quality', 'completed', now());
 SELECT pg_temp.mkjob('bbbbbb02-7c12-0000-0000-000000000002',
-                     '22222202-7c12-0000-000000000002',
+                     '22222202-7c12-0000-0000-000000000002',
                      'image', 'image', 'completed', now());
 
 SELECT lives_ok(
@@ -387,7 +387,7 @@ SELECT lives_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 
 SELECT lives_ok(
@@ -399,7 +399,7 @@ SELECT lives_ok(
 SELECT pg_temp.setquota(1, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed', now());
 
 SELECT lives_ok(
@@ -443,7 +443,7 @@ SELECT ok(private.media_lane_gpu_seconds('bogus') IS NULL,
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 150, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed', now());
 
 SELECT throws_ok(
@@ -456,7 +456,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 550, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed', now());
 
 SELECT throws_ok(
@@ -468,7 +468,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 550, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 
 SELECT throws_ok(
@@ -480,7 +480,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, NULL, 550);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 
 SELECT throws_ok(
@@ -492,7 +492,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 150, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'completed', now());
 
 SELECT lives_ok(
@@ -503,10 +503,10 @@ SELECT lives_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, NULL, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'quality', 'completed', now());
 
 SELECT lives_ok(
@@ -517,7 +517,7 @@ SELECT lives_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 150, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'cancelled', now());
 
 SELECT throws_ok(
@@ -529,7 +529,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 150, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob('bbbbbb01-7c12-0000-0000-000000000001',
-                     '22222201-7c12-0000-000000000001',
+                     '22222201-7c12-0000-0000-000000000001',
                      'video', 'lightning', 'dead_lettered', now());
 
 SELECT throws_ok(
@@ -543,7 +543,7 @@ SELECT throws_ok(
 SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 50, NULL);
 SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 SELECT pg_temp.mkjob_key('bbbbbb01-7c12-0000-0000-000000000001',
-                         '22222201-7c12-0000-000000000001',
+                         '22222201-7c12-0000-0000-000000000001',
                          'video', 'lightning', 'completed', now(), 'b9-key');
 
 SELECT lives_ok(
@@ -578,7 +578,7 @@ SELECT pg_temp.clearjobs('bbbbbb01-7c12-0000-0000-000000000001');
 
 SELECT ok(
   (SELECT already_exists FROM public.submit_media_job(
-    '22222201-7c12-0000-000000000001'::uuid,
+    '22222201-7c12-0000-0000-000000000001'::uuid,
     'bbbbbb01-7c12-0000-0000-000000000001'::uuid,
     'video', 'Un video',
     '{"lane": "lightning"}'::jsonb, 'a1-key')) = false,
@@ -601,7 +601,7 @@ SELECT throws_ok(
 
 SELECT is(
   (SELECT count(*)::int FROM public.media_generation_jobs
-   WHERE organization_id = 'bbbbbb01-7c12-0000-000000000001'::uuid
+   WHERE organization_id = 'bbbbbb01-7c12-0000-0000-000000000001'::uuid
      AND idempotency_key = 'a2-key'),
   0, 'A2b: the rejected submission reserved no job row');
 
@@ -612,7 +612,7 @@ SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 150, NULL);
 
 SELECT ok(
   (SELECT already_exists FROM public.submit_media_job(
-    '22222201-7c12-0000-000000000001'::uuid,
+    '22222201-7c12-0000-0000-000000000001'::uuid,
     'bbbbbb01-7c12-0000-0000-000000000001'::uuid,
     'video', 'Un video',
     '{"lane": "lightning"}'::jsonb, 'a3-key')) = false,
@@ -622,7 +622,7 @@ SELECT pg_temp.setquota(NULL, NULL, NULL, NULL, NULL, NULL, 50, NULL);
 
 SELECT ok(
   (SELECT already_exists FROM public.submit_media_job(
-    '22222201-7c12-0000-000000000001'::uuid,
+    '22222201-7c12-0000-0000-000000000001'::uuid,
     'bbbbbb01-7c12-0000-0000-000000000001'::uuid,
     'video', 'Un video',
     '{"lane": "lightning"}'::jsonb, 'a3-key')) = true,
@@ -691,7 +691,7 @@ DO $qrace$
 DECLARE
   v_conn TEXT := pg_temp.race_connstr();
   v_org  UUID := 'bbbbbb03-7c12-0000-0000-000000000003';
-  v_user UUID := '22222203-7c12-0000-000000000003';
+  v_user UUID := '22222203-7c12-0000-0000-000000000003';
   v_a_job UUID;
   v_a_msg BIGINT;
   v_b_sqlstate TEXT := 'NO_ERROR';
