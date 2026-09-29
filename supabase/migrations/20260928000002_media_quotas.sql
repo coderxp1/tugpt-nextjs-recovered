@@ -305,7 +305,7 @@ BEGIN
        AND status <> 'skipped'
        AND created_at >= v_day_start
        AND (CASE WHEN kind = 'image' THEN 'image'
-                 ELSE pg_catalog.coalesce(params->>'lane', 'lightning')
+                 ELSE coalesce(params->>'lane', 'lightning')
             END) = p_lane;
     IF v_daily_count >= v_daily_limit THEN
       RAISE EXCEPTION 'MEDIA_QUOTA_EXCEEDED'
@@ -321,7 +321,7 @@ BEGIN
        AND status <> 'skipped'
        AND created_at >= v_month_start
        AND (CASE WHEN kind = 'image' THEN 'image'
-                 ELSE pg_catalog.coalesce(params->>'lane', 'lightning')
+                 ELSE coalesce(params->>'lane', 'lightning')
             END) = p_lane;
     IF v_monthly_count >= v_monthly_limit THEN
       RAISE EXCEPTION 'MEDIA_QUOTA_EXCEEDED'
@@ -333,10 +333,10 @@ BEGIN
   -- Shared GPU-compute budget: the binding constraint across lanes. The
   -- admitted usage plus this job's reference cost must not exceed it.
   IF v_daily_gpu_limit IS NOT NULL THEN
-    SELECT pg_catalog.coalesce(pg_catalog.sum(
+    SELECT coalesce(pg_catalog.sum(
       private.media_lane_gpu_seconds(
         CASE WHEN kind = 'image' THEN 'image'
-             ELSE pg_catalog.coalesce(params->>'lane', 'lightning')
+             ELSE coalesce(params->>'lane', 'lightning')
         END)), 0) INTO v_daily_gpu
       FROM public.media_generation_jobs
      WHERE organization_id = p_organization_id
@@ -350,10 +350,10 @@ BEGIN
   END IF;
 
   IF v_monthly_gpu_limit IS NOT NULL THEN
-    SELECT pg_catalog.coalesce(pg_catalog.sum(
+    SELECT coalesce(pg_catalog.sum(
       private.media_lane_gpu_seconds(
         CASE WHEN kind = 'image' THEN 'image'
-             ELSE pg_catalog.coalesce(params->>'lane', 'lightning')
+             ELSE coalesce(params->>'lane', 'lightning')
         END)), 0) INTO v_monthly_gpu
       FROM public.media_generation_jobs
      WHERE organization_id = p_organization_id
@@ -417,7 +417,7 @@ BEGIN
   IF p_kind = 'image' THEN
     v_lane := 'image';
   ELSIF p_kind = 'video' THEN
-    v_lane := pg_catalog.coalesce(p_params->>'lane', 'lightning');
+    v_lane := coalesce(p_params->>'lane', 'lightning');
   ELSE
     v_lane := NULL;
   END IF;
