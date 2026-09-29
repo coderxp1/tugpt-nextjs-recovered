@@ -6,36 +6,34 @@
 -- org at the same time, where the non-deferrable partial unique index
 -- admits exactly one winner.
 --
--- WHY THIS FILE EXISTS SEPARATELY. The race needs two genuine database
--- sessions, which pgTAP gets via a dblink self-connection. PostgreSQL
--- forbids a non-superuser from opening a dblink connection unless the
--- server actually performed password authentication
+-- WHY THIS FILE LIVES OUTSIDE supabase/tests/. The race needs two genuine
+-- database sessions, which pgTAP gets via a dblink self-connection.
+-- PostgreSQL forbids a non-superuser from opening a dblink connection
+-- unless the server actually performed password authentication
 -- (dblink_security_check: "password is required"), and the Supabase local
 -- stack answers `supabase test db` over trusted TCP — so under the regular
 -- `supabase test db --local` run (session user `postgres`, not a
--- superuser there) the self-connection is impossible and any in-file race
--- could only SKIP. A skipped race is not evidence.
+-- superuser there) the self-connection is impossible. Worse, pg_prove
+-- fails the whole run when any file executes zero tests, so a plan(0)
+-- no-op inside the scanned tree is not an option either.
 --
--- This file therefore runs in the CI `database-tests` job's dedicated race
--- step, invoked as the image's superuser:
+-- This file therefore lives in supabase/race-tests/ (NOT scanned by the
+-- `--local` run) and is invoked explicitly by the CI `database-tests`
+-- job's dedicated race step, as the image's superuser:
 --
 --   supabase test db \
 --     --db-url "postgresql://supabase_admin:postgres@127.0.0.1:56322/postgres" \
---     supabase/tests/database/media_concurrency_race.test.sql
+--     supabase/race-tests/media_concurrency_race.test.sql
 --
 -- (port 56322 is config.toml [db].port; supabase_admin is the
 -- supabase/postgres superuser whose password the image sets from the db
 -- password.) As superuser the dblink security checks are skipped and the
 -- unix-socket self-connection just works, so D3a..D3d execute as ordinary
--- assertions. If the self-connection fails here anyway, the file FAILS
--- CLOSED (RAISE EXCEPTION) — there is no skip path in this file.
+-- assertions. If this file is ever run as a non-superuser, or the
+-- self-connection fails, it FAILS CLOSED (RAISE EXCEPTION) — there is no
+-- skip path in this file.
 --
--- Under the regular `--local` run this file is still picked up by the
--- recursive scan, so it detects the non-superuser session and emits
--- plan(0) with a diagnostic: a no-op, never a failure, never a skip of a
--- test that claims to have run.
---
--- Orchestration (superuser path):
+-- Orchestration:
 --   1. setup session: org D (+ owner, flag on), COMMIT — visible to all.
 --   2. session A: BEGIN; enqueue(org D, key 'race-a') -> job_a, msg_a.
 --      A holds its transaction OPEN (uncommitted).
@@ -57,15 +55,23 @@ CREATE EXTENSION IF NOT EXISTS dblink;
 
 BEGIN;
 
-CREATE TEMP TABLE _race_run(run BOOLEAN);
-INSERT INTO _race_run SELECT rolsuper FROM pg_roles WHERE rolname = current_user;
+-- Fail closed: this file only runs as a superuser. Any other session, or a
+-- failed self-connection, is a real environment problem — never a skip.
+DO $guard$
+BEGIN
+  IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'D3 race: must run as a superuser (CI race step as supabase_admin); current_user=%', current_user;
+  END IF;
+  BEGIN
+    PERFORM dblink_connect('race_guard', format('dbname=%s', current_database()));
+    PERFORM dblink_disconnect('race_guard');
+  EXCEPTION WHEN OTHERS THEN
+    RAISE EXCEPTION 'D3 race: dblink self-connection failed as superuser %: %',
+      current_user, SQLERRM;
+  END;
+END $guard$;
 
-SELECT plan((SELECT CASE WHEN run THEN 4 ELSE 0 END FROM _race_run));
-
-SELECT diag('D3 genuine race: ' ||
-  CASE WHEN (SELECT run FROM _race_run)
-       THEN 'running as superuser ' || current_user || ' — D3a..D3d execute for real'
-       ELSE 'non-superuser session — no-op under this invocation (runs in the CI race step)' END);
+SELECT plan(4);
 
 CREATE TEMP TABLE _race_out(
   a_job UUID, a_msg BIGINT, b_sqlstate TEXT, active_ct INT, survivor UUID
@@ -82,18 +88,6 @@ DECLARE
   v_active INT;
   v_survivor UUID;
 BEGIN
-  IF NOT (SELECT run FROM _race_run) THEN RETURN; END IF;
-
-  -- Fail closed: as superuser the self-connection must work. Any failure
-  -- here is a real environment problem, not a reason to skip.
-  BEGIN
-    PERFORM dblink_connect('race_selftest', v_conn);
-    PERFORM dblink_disconnect('race_selftest');
-  EXCEPTION WHEN OTHERS THEN
-    RAISE EXCEPTION 'D3 race: dblink self-connection failed as superuser %: %',
-      current_user, SQLERRM;
-  END;
-
   -- 1. Committed fixtures for org D, via their own session (this session's
   --    own inserts are uncommitted and invisible to the race sessions).
   PERFORM dblink_connect('race_setup', v_conn);
@@ -101,9 +95,16 @@ BEGIN
   PERFORM dblink_exec('race_setup', format(
     $$INSERT INTO public.organizations(id,name,slug)
       VALUES ('%s','Race Org D','race-org-d')$$, v_org));
+  -- profiles.id has a FK to auth.users.id; create the auth user first
+  -- (same column list as the suite fixtures in media_worker_rpcs.test.sql).
+  PERFORM dblink_exec('race_setup', format(
+    $$INSERT INTO auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at, raw_app_meta_data, raw_user_meta_data, is_super_admin, confirmation_token, recovery_token, email_change_token_new, email_change)
+      VALUES ('00000000-0000-0000-0000-000000000000','%s','authenticated','authenticated','race-d@example.com','','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','{}','{}',false,'','','','')
+      ON CONFLICT (id) DO NOTHING$$, v_user));
   PERFORM dblink_exec('race_setup', format(
     $$INSERT INTO public.profiles(id,email)
-      VALUES ('%s','race-d@example.com')$$, v_user));
+      VALUES ('%s','race-d@example.com')
+      ON CONFLICT (id) DO NOTHING$$, v_user));
   PERFORM dblink_exec('race_setup', format(
     $$INSERT INTO public.organization_members(organization_id,user_id,role)
       VALUES ('%s','%s','owner')$$, v_org, v_user));
@@ -166,6 +167,7 @@ BEGIN
   DELETE FROM public.feature_flags WHERE organization_id = v_org AND key = 'media_generation';
   DELETE FROM public.organization_members WHERE organization_id = v_org;
   DELETE FROM public.profiles WHERE id = v_user;
+  DELETE FROM auth.users WHERE id = v_user;
   DELETE FROM public.organizations WHERE id = v_org;
   -- race_setup committed a second global flag row (its NOT EXISTS could not
   -- see this session's uncommitted one); collapse back to exactly one so the
@@ -176,21 +178,17 @@ BEGIN
 END $race$;
 
 SELECT is((SELECT b_sqlstate FROM _race_out), 'P3M09',
-          'D3a: loser of the genuine two-session race gets P3M09')
-WHERE (SELECT run FROM _race_run);
+          'D3a: loser of the genuine two-session race gets P3M09');
 
 SELECT is((SELECT active_ct FROM _race_out), 1,
-          'D3b: exactly one job survives the race')
-WHERE (SELECT run FROM _race_run);
+          'D3b: exactly one job survives the race');
 
 SELECT is((SELECT survivor FROM _race_out), (SELECT a_job FROM _race_out),
-          'D3c: the survivor is the session that committed first')
-WHERE (SELECT run FROM _race_run);
+          'D3c: the survivor is the session that committed first');
 
 SELECT is((SELECT count(*)::int FROM public.media_generation_jobs
            WHERE idempotency_key = 'race-b'), 0,
-          'D3d: the loser''s job row never materialized')
-WHERE (SELECT run FROM _race_run);
+          'D3d: the loser''s job row never materialized');
 
 SELECT * FROM finish();
 ROLLBACK;

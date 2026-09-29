@@ -10,61 +10,47 @@
 -- the check and the enqueue were not atomic, both sessions could read 0
 -- admitted and both would enqueue, over-admitting the budget.
 --
--- WHY THIS FILE EXISTS SEPARATELY. The race needs two genuine database
--- sessions, which pgTAP gets via a dblink self-connection. PostgreSQL
--- forbids a non-superuser from opening a dblink connection unless the
--- server actually performed password authentication
+-- WHY THIS FILE LIVES OUTSIDE supabase/tests/. The race needs two genuine
+-- database sessions, which pgTAP gets via a dblink self-connection.
+-- PostgreSQL forbids a non-superuser from opening a dblink connection
+-- unless the server actually performed password authentication
 -- (dblink_security_check: "password is required"), and the Supabase local
 -- stack answers `supabase test db` over trusted TCP — so under the regular
 -- `supabase test db --local` run (session user `postgres`, not a
--- superuser there) the self-connection is impossible and any in-file race
--- could only SKIP. A skipped race is not evidence.
+-- superuser there) the self-connection is impossible. Worse, pg_prove
+-- fails the whole run when any scanned file executes zero tests, so a
+-- plan(0) no-op inside the suite tree is not an option either.
 --
--- This file therefore runs in the CI `database-tests` job's dedicated race
--- step, invoked as the image's superuser:
+-- This file therefore lives in supabase/race-tests/ (NOT scanned by the
+-- `--local` run) and is invoked explicitly by the CI `database-tests`
+-- job's dedicated race step, as the image's superuser:
 --
 --   supabase test db \
 --     --db-url "postgresql://supabase_admin:postgres@127.0.0.1:56322/postgres" \
---     supabase/tests/database/media_concurrency_race.test.sql \
---     supabase/tests/database/media_quota_race.test.sql
+--     supabase/race-tests/media_quota_race.test.sql
 --
 -- (port 56322 is config.toml [db].port; supabase_admin is the
 -- supabase/postgres superuser whose password the image sets from the db
 -- password.) As superuser the dblink security checks are skipped and the
 -- unix-socket self-connection just works, so C1..C5 execute as ordinary
--- assertions. If the self-connection fails here anyway, the file FAILS
--- CLOSED (RAISE EXCEPTION) — there is no skip path in this file.
---
--- Under the regular `--local` run this file is still picked up by the
--- recursive scan, so it detects the non-superuser session and emits
--- plan(0) plus a diagnostic: a standard TAP "no tests here", never a
--- failure, never a skip of a test that claims to have run. (pgTAP's
--- finish() raises "No tests run!" on plan(0), so the no-op path skips
--- finish().)
+-- assertions. If this file is ever run as a non-superuser, or the
+-- self-connection fails, it FAILS CLOSED (RAISE EXCEPTION) — there is no
+-- skip path in this file.
 
 CREATE EXTENSION IF NOT EXISTS dblink;
 
 BEGIN;
 
-CREATE TEMP TABLE _qrace_run(run BOOLEAN);
-INSERT INTO _qrace_run SELECT rolsuper FROM pg_roles WHERE rolname = current_user;
-
--- plan(0) is the standard TAP skip-all ("1..0"): pg_prove reports the file
--- as having no tests, and the run stays green. finish() is only for the
--- path that ran tests (it raises "No tests run!" on plan(0)).
-DO $plan$
+-- Fail closed: this file only runs as a superuser. Any other session is a
+-- real environment problem — never a skip.
+DO $guard$
 BEGIN
-  IF (SELECT run FROM _qrace_run) THEN
-    PERFORM plan(5);
-  ELSE
-    PERFORM plan(0);
+  IF NOT (SELECT rolsuper FROM pg_roles WHERE rolname = current_user) THEN
+    RAISE EXCEPTION 'C quota race: must run as a superuser (CI race step as supabase_admin); current_user=%', current_user;
   END IF;
-END $plan$;
+END $guard$;
 
-SELECT diag('C quota race: ' ||
-  CASE WHEN (SELECT run FROM _qrace_run)
-       THEN 'running as superuser ' || current_user || ' — C1..C5 execute for real'
-       ELSE 'non-superuser session — no-op under this invocation (runs in the CI race step)' END);
+SELECT plan(5);
 
 CREATE TEMP TABLE _qrace_out(
   b_sqlstate TEXT, job_ct INT, admitted_gpu INT, winner_lane TEXT
@@ -82,8 +68,6 @@ DECLARE
   v_gpu INT;
   v_lane TEXT;
 BEGIN
-  IF NOT (SELECT run FROM _qrace_run) THEN RETURN; END IF;
-
   -- Fail closed: as superuser the self-connection must work. Any failure
   -- here is a real environment problem, not a reason to skip.
   BEGIN
@@ -102,9 +86,16 @@ BEGIN
   PERFORM dblink_exec('qrace_setup', format(
     $$INSERT INTO public.organizations(id,name,slug)
       VALUES ('%s','Race Org Q','race-org-q')$$, v_org));
+  -- profiles.id has a FK to auth.users.id; create the auth user first
+  -- (same column list as the suite fixtures in media_quotas.test.sql).
+  PERFORM dblink_exec('qrace_setup', format(
+    $$INSERT INTO auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at, raw_app_meta_data, raw_user_meta_data, is_super_admin, confirmation_token, recovery_token, email_change_token_new, email_change)
+      VALUES ('00000000-0000-0000-0000-000000000000','%s','authenticated','authenticated','race-q@example.com','','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','{}','{}',false,'','','','')
+      ON CONFLICT (id) DO NOTHING$$, v_user));
   PERFORM dblink_exec('qrace_setup', format(
     $$INSERT INTO public.profiles(id,email)
-      VALUES ('%s','race-q@example.com')$$, v_user));
+      VALUES ('%s','race-q@example.com')
+      ON CONFLICT (id) DO NOTHING$$, v_user));
   PERFORM dblink_exec('qrace_setup', format(
     $$INSERT INTO public.organization_members(organization_id,user_id,role)
       VALUES ('%s','%s','owner')$$, v_org, v_user));
@@ -184,6 +175,7 @@ BEGIN
   DELETE FROM public.feature_flags WHERE organization_id = v_org AND key = 'media_generation';
   DELETE FROM public.organization_members WHERE organization_id = v_org;
   DELETE FROM public.profiles WHERE id = v_user;
+  DELETE FROM auth.users WHERE id = v_user;
   DELETE FROM public.organizations WHERE id = v_org;
   -- qrace_setup committed a second global flag row (its NOT EXISTS could
   -- not see this session's uncommitted one); collapse back to exactly one
@@ -194,30 +186,20 @@ BEGIN
 END $qrace$;
 
 SELECT is((SELECT b_sqlstate FROM _qrace_out), 'P3M16',
-          'C1: the loser of the genuine two-session race gets P3M16 (quota), not P3M09')
-WHERE (SELECT run FROM _qrace_run);
+          'C1: the loser of the genuine two-session race gets P3M16 (quota), not P3M09');
 
 SELECT is((SELECT job_ct FROM _qrace_out), 1,
-          'C2: exactly one job survives the concurrent race')
-WHERE (SELECT run FROM _qrace_run);
+          'C2: exactly one job survives the concurrent race');
 
 SELECT is((SELECT admitted_gpu FROM _qrace_out), 100,
-          'C3: total admitted reference GPU-s is exactly the lightning winner''s 100 (<= 550 budget)')
-WHERE (SELECT run FROM _qrace_run);
+          'C3: total admitted reference GPU-s is exactly the lightning winner''s 100 (<= 550 budget)');
 
 SELECT is((SELECT winner_lane FROM _qrace_out), 'lightning',
-          'C4: the survivor is the session that committed first (lightning)')
-WHERE (SELECT run FROM _qrace_run);
+          'C4: the survivor is the session that committed first (lightning)');
 
 SELECT is((SELECT count(*)::int FROM public.media_generation_jobs
            WHERE idempotency_key = 'qrace-b'), 0,
-          'C5: the loser''s job row never materialized')
-WHERE (SELECT run FROM _qrace_run);
+          'C5: the loser''s job row never materialized');
 
-DO $finish$
-BEGIN
-  IF (SELECT run FROM _qrace_run) THEN
-    PERFORM finish();
-  END IF;
-END $finish$;
+SELECT * FROM finish();
 ROLLBACK;
