@@ -32,8 +32,10 @@
 --
 -- Under the regular `--local` run this file is still picked up by the
 -- recursive scan, so it detects the non-superuser session and emits
--- plan(0) with a diagnostic: a no-op, never a failure, never a skip of a
--- test that claims to have run.
+-- plan(0) plus a diagnostic: a standard TAP "no tests here", never a
+-- failure, never a skip of a test that claims to have run. (pgTAP's
+-- finish() raises "No tests run!" on plan(0), so the no-op path skips
+-- finish().)
 --
 -- Orchestration (superuser path):
 --   1. setup session: org D (+ owner, flag on), COMMIT — visible to all.
@@ -60,7 +62,17 @@ BEGIN;
 CREATE TEMP TABLE _race_run(run BOOLEAN);
 INSERT INTO _race_run SELECT rolsuper FROM pg_roles WHERE rolname = current_user;
 
-SELECT plan((SELECT CASE WHEN run THEN 4 ELSE 0 END FROM _race_run));
+-- plan(0) is the standard TAP skip-all ("1..0"): pg_prove reports the file
+-- as having no tests, and the run stays green. finish() is only for the
+-- path that ran tests (it raises "No tests run!" on plan(0)).
+DO $plan$
+BEGIN
+  IF (SELECT run FROM _race_run) THEN
+    PERFORM plan(4);
+  ELSE
+    PERFORM plan(0);
+  END IF;
+END $plan$;
 
 SELECT diag('D3 genuine race: ' ||
   CASE WHEN (SELECT run FROM _race_run)
@@ -192,5 +204,10 @@ SELECT is((SELECT count(*)::int FROM public.media_generation_jobs
           'D3d: the loser''s job row never materialized')
 WHERE (SELECT run FROM _race_run);
 
-SELECT * FROM finish();
+DO $finish$
+BEGIN
+  IF (SELECT run FROM _race_run) THEN
+    PERFORM finish();
+  END IF;
+END $finish$;
 ROLLBACK;
