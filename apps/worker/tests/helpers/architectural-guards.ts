@@ -21,7 +21,7 @@ const SKIP_DIRS = new Set([
 
 /** Normalize relative filesystem paths to POSIX forward slashes. */
 export function normalizePath(rel: string): string {
-  return rel.split(path.sep).join('/');
+  return rel.replace(/\\/g, '/');
 }
 
 export interface TraversalError {
