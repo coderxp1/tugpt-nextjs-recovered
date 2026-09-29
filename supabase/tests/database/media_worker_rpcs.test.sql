@@ -300,13 +300,41 @@ SELECT lives_ok(
 -- blocks-then-fails (before A's COMMIT) or fails at once (after). The
 -- pg_sleep only widens the overlap window; it does not decide the outcome.
 
+-- Self-connection for the genuine two-session race. Tries the unix socket
+-- first, then TCP loopback on the server's own port: under
+-- `supabase test db` (CI and local) the test session arrives over TCP and
+-- the unix-socket self-connection is unavailable, so the probe falls through
+-- to TCP. The last resort uses the documented Supabase local default
+-- credentials (postgres/postgres). Returns NULL when nothing works; the diag
+-- below then prints the actual libpq error instead of silently skipping.
 CREATE OR REPLACE FUNCTION pg_temp.race_connstr() RETURNS TEXT
-LANGUAGE sql STABLE AS $$
-  -- No host: libpq defaults to the unix socket, i.e. this same server.
-  SELECT format('dbname=%s', current_database())
+LANGUAGE plpgsql STABLE AS $$
+DECLARE
+  c TEXT;
+BEGIN
+  FOR c IN
+    SELECT unnest(ARRAY[
+      format('dbname=%s', current_database()),
+      format('host=/var/run/postgresql dbname=%s', current_database()),
+      format('host=localhost port=%s dbname=%s',
+             current_setting('port'), current_database()),
+      format('host=localhost port=%s dbname=%s user=postgres password=postgres',
+             current_setting('port'), current_database())
+    ])
+  LOOP
+    BEGIN
+      PERFORM dblink_connect('race_probe', c);
+      PERFORM dblink_disconnect('race_probe');
+      RETURN c;
+    EXCEPTION WHEN OTHERS THEN
+      NULL; -- try the next candidate
+    END;
+  END LOOP;
+  RETURN NULL;
+END;
 $$;
 
-CREATE TEMP TABLE _race_env(avail BOOLEAN);
+CREATE TEMP TABLE _race_env(avail BOOLEAN, detail TEXT);
 CREATE TEMP TABLE _race_out(
   a_job UUID, a_msg BIGINT, b_sqlstate TEXT, active_ct INT, survivor UUID
 );
@@ -315,18 +343,26 @@ DO $race$
 DECLARE
   v_conn TEXT := pg_temp.race_connstr();
 BEGIN
-  BEGIN
-    PERFORM dblink_connect('race_probe', v_conn);
+  IF v_conn IS NULL THEN
+    BEGIN
+      -- Capture the concrete reason the last-resort candidate failed.
+      PERFORM dblink_connect('race_probe',
+        format('host=localhost port=%s dbname=%s user=postgres password=postgres',
+               current_setting('port'), current_database()));
+    EXCEPTION WHEN OTHERS THEN
+      INSERT INTO _race_env VALUES (false, SQLERRM);
+      RETURN;
+    END;
     PERFORM dblink_disconnect('race_probe');
-    INSERT INTO _race_env VALUES (true);
-  EXCEPTION WHEN OTHERS THEN
-    INSERT INTO _race_env VALUES (false);
-  END;
+    INSERT INTO _race_env VALUES (false, 'unexpected: last-resort probe connected on retry');
+  ELSE
+    INSERT INTO _race_env VALUES (true, v_conn);
+  END IF;
 END $race$;
 
 SELECT diag('D3 genuine race: dblink self-connection ' ||
-  CASE WHEN (SELECT avail FROM _race_env) THEN 'available'
-       ELSE 'UNAVAILABLE — D3a..D3d will skip' END);
+  CASE WHEN (SELECT avail FROM _race_env) THEN 'available via ' || (SELECT detail FROM _race_env)
+       ELSE 'UNAVAILABLE — D3a..D3d will skip (' || (SELECT detail FROM _race_env) || ')' END);
 
 SELECT skip('D3: dblink self-connection unavailable in this environment', 4)
 WHERE NOT (SELECT avail FROM _race_env);
