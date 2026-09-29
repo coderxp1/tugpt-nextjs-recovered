@@ -204,7 +204,7 @@ describe('production wiring never reaches a cut provider (ADR-006)', () => {
     // 'apps/worker/src' from the list is the cheapest way to make this whole
     // file pass while checking nothing, and a direct scan would not notice.
     const scanned = PRODUCTION_ROOTS.flatMap((r) =>
-      productionFilesIn(path.join(REPO_ROOT, r)).map((f) => path.relative(REPO_ROOT, f))
+      productionFilesIn(path.join(REPO_ROOT, r)).map((f) => path.relative(REPO_ROOT, f).replace(/\\/g, '/'))
     );
     expect(scanned).toContain('apps/worker/src/draft-orchestrator-factory.ts');
   });
