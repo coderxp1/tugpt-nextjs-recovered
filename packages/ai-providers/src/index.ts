@@ -41,6 +41,7 @@
  */
 export * from './adapter';
 export * from './anymize';
+export * from './comfyui';
 export * from './errors';
 export * from './gladia';
 export * from './langdock';
