@@ -203,7 +203,7 @@ describe('ComfyUIAdapter', () => {
         organizationId: 'org-test-123',
         jobId: 'job-vid-789',
         domain: 'video',
-        lane: 'default',
+        lane: 'lightning',
         prompt: 'A dramatic cinematic landscape with stormy sky',
         seed: 12345,
       });
