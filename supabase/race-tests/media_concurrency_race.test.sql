@@ -95,9 +95,16 @@ BEGIN
   PERFORM dblink_exec('race_setup', format(
     $$INSERT INTO public.organizations(id,name,slug)
       VALUES ('%s','Race Org D','race-org-d')$$, v_org));
+  -- profiles.id has a FK to auth.users.id; create the auth user first
+  -- (same column list as the suite fixtures in media_worker_rpcs.test.sql).
+  PERFORM dblink_exec('race_setup', format(
+    $$INSERT INTO auth.users (instance_id, id, aud, role, email, encrypted_password, email_confirmed_at, created_at, updated_at, raw_app_meta_data, raw_user_meta_data, is_super_admin, confirmation_token, recovery_token, email_change_token_new, email_change)
+      VALUES ('00000000-0000-0000-0000-000000000000','%s','authenticated','authenticated','race-d@example.com','','2026-01-01 00:00:00','2026-01-01 00:00:00','2026-01-01 00:00:00','{}','{}',false,'','','','')
+      ON CONFLICT (id) DO NOTHING$$, v_user));
   PERFORM dblink_exec('race_setup', format(
     $$INSERT INTO public.profiles(id,email)
-      VALUES ('%s','race-d@example.com')$$, v_user));
+      VALUES ('%s','race-d@example.com')
+      ON CONFLICT (id) DO NOTHING$$, v_user));
   PERFORM dblink_exec('race_setup', format(
     $$INSERT INTO public.organization_members(organization_id,user_id,role)
       VALUES ('%s','%s','owner')$$, v_org, v_user));
@@ -160,6 +167,7 @@ BEGIN
   DELETE FROM public.feature_flags WHERE organization_id = v_org AND key = 'media_generation';
   DELETE FROM public.organization_members WHERE organization_id = v_org;
   DELETE FROM public.profiles WHERE id = v_user;
+  DELETE FROM auth.users WHERE id = v_user;
   DELETE FROM public.organizations WHERE id = v_org;
   -- race_setup committed a second global flag row (its NOT EXISTS could not
   -- see this session's uncommitted one); collapse back to exactly one so the
