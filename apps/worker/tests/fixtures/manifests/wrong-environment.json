@@ -1,0 +1,9 @@
+{
+  "schemaVersion": "1.0.0",
+  "targetEnvironment": "production",
+  "approvedRepository": "ghcr.io/coderxp1/tugpt-web",
+  "approvedDigest": "sha256:0ad074799abb27b96cc85c3e31ac50f9ee417595fff2e29088a3a093e634e54e",
+  "sourceCommit": "a6700f1be9ee9bd63d741fb70283149c2d2011f3",
+  "approvedStagingSupabaseUrl": "https://test-fixture-staging.supabase.co",
+  "approvedStagingAnonKey": "test-key"
+}

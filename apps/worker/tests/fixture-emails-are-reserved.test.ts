@@ -37,79 +37,17 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import {
+  scanFixtureEmails,
+  isReservedEmailDomain as isReservedDomainHelper,
+  extractEmails,
+} from './helpers/architectural-guards';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
-const ROOTS = ['apps', 'packages', 'supabase/tests'];
-const SKIP_DIRS = new Set(['node_modules', 'dist', '.next', '.turbo', '.git', 'coverage']);
 
-/**
- * The two files whose subject is the bad domains, so they must contain them.
- *
- * Exempted by exact path rather than by a `*.test.ts` rule, because the point
- * is that every other test file is checked. `no-dead-domain.test.ts` asserts
- * `DEAD_DOMAIN.test('owner@tugpt.ai')` as a positive control, and this file
- * asserts that `tugpt.ai` and `test.com` are not reserved; each is the other's
- * mirror image, and each guards the other everywhere else.
- */
-const EXEMPT = new Set([
-  'apps/worker/tests/fixture-emails-are-reserved.test.ts',
-  'apps/worker/tests/no-dead-domain.test.ts',
-]);
-
-/**
- * RFC 2606 §2 and §3. Reserved in perpetuity, registrable by nobody.
- *
- * Subdomains count: `internal-e2e-test.invalid` is as safe as `.invalid`
- * itself, and the e2e harness uses one to make its addresses self-describing.
- */
-const RESERVED_TLDS = ['test', 'example', 'invalid', 'localhost'];
-const RESERVED_DOMAINS = ['example.com', 'example.net', 'example.org'];
-
-export function isReservedEmailDomain(domain: string): boolean {
-  const d = domain.toLowerCase();
-  if (RESERVED_DOMAINS.some((r) => d === r || d.endsWith(`.${r}`))) return true;
-  return RESERVED_TLDS.some((t) => d === t || d.endsWith(`.${t}`));
-}
-
-/**
- * Addresses in a source file.
- *
- * Requires a local part, so npm scopes (`@tugpt/auth`) do not match, and a
- * dotted TLD of letters, so version specifiers (`pnpm@10.34.1`) do not either.
- * T1 and T2 are what keep that claim honest.
- */
-export function emailsIn(source: string): string[] {
-  return source.match(/[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*\.[A-Za-z]{2,}/g) ?? [];
-}
-
-function walk(dir: string, out: string[]): void {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (SKIP_DIRS.has(entry)) continue;
-    const full = path.join(dir, entry);
-    let isDir: boolean;
-    try {
-      isDir = statSync(full).isDirectory();
-    } catch {
-      continue;
-    }
-    if (isDir) walk(full, out);
-    else out.push(path.relative(REPO_ROOT, full));
-  }
-}
-
-function testFiles(): string[] {
-  const out: string[] = [];
-  for (const root of ROOTS) walk(path.join(REPO_ROOT, root), out);
-  return out.filter((f) => /\.test\.(ts|tsx|sql)$/.test(f)).filter((f) => !EXEMPT.has(f));
-}
+export const isReservedEmailDomain = isReservedDomainHelper;
+export const emailsIn = extractEmails;
 
 describe('the extractor', () => {
   it('T1: finds addresses, and only addresses', () => {
@@ -156,29 +94,20 @@ describe('the reserved-domain rule', () => {
 });
 
 describe('every fixture address in the suite', () => {
-  const files = testFiles();
+  const results = scanFixtureEmails(REPO_ROOT);
 
-  it('T6: found the test files it is checking', () => {
+  it('T6: found the test files it is checking without traversal errors', () => {
+    // Assert no traversal errors occurred during scanning
+    expect(results.traversalErrors).toEqual([]);
+
     // A moved root, or a changed test-file convention, must fail here rather
     // than quietly turn this into an assertion about nothing.
-    expect(files.length, 'test file set looks empty — check ROOTS').toBeGreaterThan(20);
-    expect(files.some((f) => f.endsWith('.sql')), 'no pgTAP files found').toBe(true);
+    expect(results.scannedFiles.length, 'test file set looks empty — check ROOTS').toBeGreaterThan(20);
+    expect(results.scannedFiles.some((f) => f.endsWith('.sql')), 'no pgTAP files found').toBe(true);
   });
 
   it('T7: uses a domain reserved by RFC 2606', () => {
-    const offenders: string[] = [];
-    for (const rel of files) {
-      let source: string;
-      try {
-        source = readFileSync(path.join(REPO_ROOT, rel), 'utf8');
-      } catch {
-        continue;
-      }
-      for (const addr of new Set(emailsIn(source))) {
-        const domain = addr.slice(addr.lastIndexOf('@') + 1);
-        if (!isReservedEmailDomain(domain)) offenders.push(`${rel}: ${addr}`);
-      }
-    }
+    const offenders = results.violations.flatMap((r) => r.violations.map((v) => `${r.file}: ${v}`));
 
     expect(
       offenders,

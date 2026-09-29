@@ -27,8 +27,13 @@
  */
 
 import { describe, expect, it } from 'vitest';
-import { readFileSync, readdirSync, statSync } from 'node:fs';
+import { readFileSync } from 'node:fs';
 import path from 'node:path';
+import {
+  scanDeadDomains,
+  DEAD_DOMAIN_PATTERN,
+  DEFAULT_DEAD_DOMAIN_ALLOWED,
+} from './helpers/architectural-guards';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
 
@@ -44,89 +49,16 @@ const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
  * names and must not match, which is what the trailing exclusion of `-` and `/`
  * is for.
  */
-const DEAD_DOMAIN = /tugpt\\?[._-]ai(?![-a-z0-9])/i;
+const DEAD_DOMAIN = DEAD_DOMAIN_PATTERN;
 
-/** Directories that run or deploy. Prose lives elsewhere and is not guarded. */
-const GUARDED_ROOTS = ['apps', 'packages', 'deploy', 'supabase'];
-
-/** Individual files outside those roots that still ship or deploy. */
-const GUARDED_FILES = ['docker-compose.yml', 'package.json', 'turbo.json'];
-
-const SKIP_DIRS = new Set([
-  'node_modules',
-  'dist',
-  '.next',
-  '.turbo',
-  '.git',
-  'coverage',
-]);
-
-/**
- * Files that may still contain it, and why. Every entry is a standing
- * instruction or a repository rule, not a convenience.
- *
- * Both survivors are files nobody is allowed to edit, and in both the hit is a
- * header comment naming the product — not a hostname anything resolves.
- *
- * There were ten entries. The other eight were fixture email addresses, parked
- * here on 2026-08-28 because the files were being modified on PR #47 and
- * rebasing a migration PR mid-review to change test data is the wrong trade.
- * They were changed to `example.com` on 2026-08-31 and their exemptions
- * deleted with them. An exemption list that only grows stops being a list of
- * exceptions and becomes the rule.
- */
-const ALLOWED = new Map<string, string>([
-  [
-    'supabase/seed.sql',
-    'Owner instruction, standing: the seed file is not to be modified. The hit ' +
-      'is a header comment naming the product, not a hostname anything resolves.',
-  ],
-  [
-    'supabase/migrations/20260716000001_initial_schema.sql',
-    'An applied migration. docs/production_environment.md section 7: never edit a ' +
-      'migration that has been applied — the CLI keys the ledger on the version ' +
-      'timestamp and would not notice the change. Header comment only.',
-  ],
-]);
-
-function walk(dir: string, out: string[]): void {
-  let entries: string[];
-  try {
-    entries = readdirSync(dir);
-  } catch {
-    return;
-  }
-  for (const entry of entries) {
-    if (SKIP_DIRS.has(entry)) continue;
-    const full = path.join(dir, entry);
-    let isDir: boolean;
-    try {
-      isDir = statSync(full).isDirectory();
-    } catch {
-      continue;
-    }
-    if (isDir) walk(full, out);
-    else out.push(path.relative(REPO_ROOT, full));
-  }
-}
-
-function guardedFiles(): string[] {
-  const out: string[] = [];
-  for (const root of GUARDED_ROOTS) walk(path.join(REPO_ROOT, root), out);
-  for (const f of GUARDED_FILES) out.push(f);
-  return out;
-}
-
-/** Text-ish files only; a binary that happens to contain the bytes is noise. */
-function isTextish(rel: string): boolean {
-  return /\.(ts|tsx|js|jsx|mjs|cjs|sql|sh|ya?ml|toml|json|env|service|md|conf|Caddyfile)$/i.test(rel)
-    || path.basename(rel) === 'Caddyfile';
-}
+const ALLOWED = DEFAULT_DEAD_DOMAIN_ALLOWED;
 
 describe('the dead domain does not come back', () => {
-  it('finds the tree it is guarding (a moved root must fail loudly, not silently pass)', () => {
-    const files = guardedFiles().filter(isTextish);
-    expect(files.length, 'guarded file set looks empty — check GUARDED_ROOTS').toBeGreaterThan(80);
+  const result = scanDeadDomains(REPO_ROOT);
+
+  it('finds the tree it is guarding without traversal errors', () => {
+    expect(result.traversalErrors).toEqual([]);
+    expect(result.scannedFiles.length, 'guarded file set looks empty — check GUARDED_ROOTS').toBeGreaterThan(80);
   });
 
   it('matches every spelling, including the two the hand audit missed', () => {
@@ -146,25 +78,7 @@ describe('the dead domain does not come back', () => {
   });
 
   it('no runtime or deploy file references it', () => {
-    const offenders = guardedFiles()
-      .filter(isTextish)
-      .filter((rel) => !ALLOWED.has(rel))
-      // These two necessarily contain the dead domain: it is the subject of
-      // their positive controls. Exempted by exact path, not by a blanket
-      // *.test.ts rule, so any other test that reintroduces the domain still
-      // fails — which is how the pgTAP fixtures were caught in the first place.
-      .filter(
-        (rel) =>
-          rel !== 'apps/worker/tests/no-dead-domain.test.ts' &&
-          rel !== 'apps/worker/tests/fixture-emails-are-reserved.test.ts'
-      )
-      .filter((rel) => {
-        try {
-          return DEAD_DOMAIN.test(readFileSync(path.join(REPO_ROOT, rel), 'utf8'));
-        } catch {
-          return false;
-        }
-      });
+    const offenders = result.violations;
 
     expect(
       offenders,

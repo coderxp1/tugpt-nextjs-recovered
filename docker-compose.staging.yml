@@ -1,0 +1,63 @@
+# docker-compose.staging.yml
+#
+# Staging and recovery rehearsal runtime for TuGPT on shared GPU host (31.47.228.55).
+# See ADR-018 for architectural decisions and governance.
+#
+# Runtime Architecture & Governance:
+# 1. Runtime-only manifest: No `build:` block. Images are built/loaded out-of-band and
+#    referenced via required variable `${TUGPT_WEB_STAGING_IMAGE:?TUGPT_WEB_STAGING_IMAGE with approved @sha256: digest is required}`.
+# 2. Administrator-owned deployment path: Staging manifests and configs reside in
+#    `/etc/tugpt/staging/` (owned by `root:root`, mode `0700`), launched via `launch-staging.sh`.
+# 3. Runs under project namespace `-p tugpt-staging`.
+# 4. Binds strictly to 127.0.0.1:3002:3000 (never 0.0.0.0, avoiding 3001 and 8188).
+# 5. Uses dedicated bridge network `tugpt_staging_net` with no host networking.
+# 6. Zero GPU devices allocated (GPU moratorium active).
+# 7. Production queue workers are strictly EXCLUDED to prevent duplicate message consumption.
+# 8. Independent project identity: connects to dedicated staging Supabase project (never production).
+# 9. Strict cgroup CPU, Memory, and PIDs limits on every container.
+# 10. Lifecycle commands:
+#     - Start:   sh /etc/tugpt/staging/launch-staging.sh
+#     - Stop:    docker compose -p tugpt-staging -f /etc/tugpt/staging/docker-compose.yml stop
+#     - Down:    docker compose -p tugpt-staging -f /etc/tugpt/staging/docker-compose.yml down
+#     - Teardown with volume deletion is an explicit, separate choice: down --volumes
+
+services:
+  web:
+    image: "${TUGPT_WEB_STAGING_IMAGE:?TUGPT_WEB_STAGING_IMAGE with approved @sha256 digest is required}"
+    restart: "no"
+    env_file:
+      - ${TUGPT_STAGING_ENV_FILE:-/etc/tugpt/staging/staging.env}
+    ports:
+      - "127.0.0.1:3002:3000"
+    networks:
+      - tugpt_staging_net
+    deploy:
+      resources:
+        limits:
+          cpus: "2.0"
+          memory: 2048M
+          pids: 100
+        reservations:
+          cpus: "0.5"
+          memory: 512M
+    security_opt:
+      - no-new-privileges:true
+    cap_drop:
+      - ALL
+    tmpfs:
+      - /tmp:rw,noexec,nosuid,size=256m
+    logging:
+      driver: "json-file"
+      options:
+        max-size: "10m"
+        max-file: "3"
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://127.0.0.1:3000/api/v1/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+
+networks:
+  tugpt_staging_net:
+    driver: bridge

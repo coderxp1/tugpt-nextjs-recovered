@@ -51,42 +51,21 @@
 import { describe, expect, it } from 'vitest';
 import { readFileSync, readdirSync, statSync } from 'node:fs';
 import path from 'node:path';
+import {
+  scanPhantomUnits,
+  getRealUnits,
+  extractUnitsOnLine,
+  extractInstructionLines,
+} from './helpers/architectural-guards';
 
 const REPO_ROOT = path.resolve(__dirname, '..', '..', '..');
-const SELF = 'apps/worker/tests/no-phantom-units.test.ts';
 
-/** Units that actually exist, read from the unit files themselves. */
 function realUnits(): Set<string> {
-  const dir = path.join(REPO_ROOT, 'deploy', 'systemd');
-  const units = readdirSync(dir)
-    .filter((f) => f.endsWith('.service'))
-    .map((f) => f.replace(/\.service$/, ''));
-  return new Set(units);
+  return getRealUnits(path.join(REPO_ROOT, 'deploy', 'systemd'));
 }
 
-/**
- * A line is an invocation if it runs systemctl or journalctl; the units it acts
- * on are every `tugpt-*` token on it.
- *
- * Deliberately not a command-line parser. `systemctl is-active A B` acts on two
- * units, `deploy/check-host.sh` calls it through `$SYSTEMCTL_CMD`, and the flags
- * differ everywhere — a parser modelling all of that is a second thing to keep
- * correct, and the first version of it silently matched one unit out of two.
- * Line-scoped matching has no such failure mode: over-matching costs an
- * allowlist entry with a reason, which is the outcome we want anyway.
- *
- * `tugpt` and `tugpt.service` do not match — the token requires a hyphen — and
- * both are real units regardless. A trailing `.service` falls outside the
- * character class, so `tugpt-draft-worker.service` yields `tugpt-draft-worker`.
- */
-const RUNNER = /systemctl|journalctl/i;
-const UNIT_TOKEN = /\btugpt-[a-z0-9-]+/g;
-
-/** The units a line acts on, or [] if it is not an invocation. */
-export function unitsOnLine(text: string): string[] {
-  if (!RUNNER.test(text)) return [];
-  return [...text.matchAll(UNIT_TOKEN)].map((m) => m[0]);
-}
+export const unitsOnLine = extractUnitsOnLine;
+export const instructionLines = extractInstructionLines;
 
 /**
  * Files that may name a unit that does not exist, and why.
@@ -100,13 +79,6 @@ const ALLOWED = new Map<string, string>([
       'anything but a failure is what the check reports.',
   ],
 ]);
-
-const SEARCH_ROOTS = [
-  { dir: 'docs', exts: ['.md'], fencedOnly: true },
-  { dir: 'deploy', exts: ['.sh'], fencedOnly: false },
-  { dir: 'apps', exts: ['.ts', '.tsx'], fencedOnly: false },
-  { dir: 'packages', exts: ['.ts', '.tsx'], fencedOnly: false },
-];
 
 const SKIP_DIRS = new Set(['node_modules', 'dist', '.next', '.turbo', '.git', 'coverage']);
 
@@ -127,55 +99,8 @@ function walk(dir: string, exts: string[], out: string[]): void {
       continue;
     }
     if (isDir) walk(full, exts, out);
-    else if (exts.some((e) => full.endsWith(e))) out.push(path.relative(REPO_ROOT, full));
+    else if (exts.some((e) => full.endsWith(e))) out.push(path.relative(REPO_ROOT, full).split(path.sep).join('/'));
   }
-}
-
-/**
- * Lines that count as instructions. For Markdown that means fenced code blocks
- * only — prose describing a command is documentation, not an instruction.
- */
-export function instructionLines(content: string, fencedOnly: boolean): { line: number; text: string }[] {
-  const lines = content.split('\n');
-  if (!fencedOnly) return lines.map((text, i) => ({ line: i + 1, text }));
-
-  const out: { line: number; text: string }[] = [];
-  let inFence = false;
-  for (let i = 0; i < lines.length; i++) {
-    const text = lines[i];
-    if (/^\s*(```|~~~)/.test(text)) {
-      inFence = !inFence;
-      continue;
-    }
-    if (inFence) out.push({ line: i + 1, text });
-  }
-  return out;
-}
-
-function offenders(): string[] {
-  const units = realUnits();
-  const found: string[] = [];
-
-  for (const root of SEARCH_ROOTS) {
-    const files: string[] = [];
-    walk(path.join(REPO_ROOT, root.dir), root.exts, files);
-
-    for (const rel of files) {
-      if (rel === SELF || ALLOWED.has(rel)) continue;
-      let content: string;
-      try {
-        content = readFileSync(path.join(REPO_ROOT, rel), 'utf8');
-      } catch {
-        continue;
-      }
-      for (const { line, text } of instructionLines(content, root.fencedOnly)) {
-        for (const unit of unitsOnLine(text)) {
-          if (!units.has(unit)) found.push(`${rel}:${line}  ${unit}  — ${text.trim()}`);
-        }
-      }
-    }
-  }
-  return found;
 }
 
 describe('no runbook drives a unit this host does not have', () => {
@@ -232,7 +157,10 @@ describe('no runbook drives a unit this host does not have', () => {
   });
 
   it('no operational instruction names a unit that does not exist', () => {
-    const found = offenders();
+    const result = scanPhantomUnits(REPO_ROOT);
+    expect(result.traversalErrors).toEqual([]);
+    expect(result.scannedFiles.length).toBeGreaterThan(10);
+    const found = result.violations.map((v) => `${v.file}:${v.line}  ${v.unit}  — ${v.text}`);
     expect(
       found,
       `These instructions drive a systemd unit that is not in deploy/systemd/:\n  ` +
