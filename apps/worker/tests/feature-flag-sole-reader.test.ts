@@ -104,7 +104,7 @@ function sourceFiles(roots: string[]): string[] {
       if (statSync(full).isDirectory()) {
         walk(full);
       } else if (/\.tsx?$/.test(entry)) {
-        out.push(path.relative(REPO_ROOT, full).replace(/\\/g, '/'));
+        out.push(path.relative(REPO_ROOT, full));
       }
     }
   };

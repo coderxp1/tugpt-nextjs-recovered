@@ -127,7 +127,7 @@ function walk(dir: string, exts: string[], out: string[]): void {
       continue;
     }
     if (isDir) walk(full, exts, out);
-    else if (exts.some((e) => full.endsWith(e))) out.push(path.relative(REPO_ROOT, full).replace(/\\/g, '/'));
+    else if (exts.some((e) => full.endsWith(e))) out.push(path.relative(REPO_ROOT, full));
   }
 }
 
