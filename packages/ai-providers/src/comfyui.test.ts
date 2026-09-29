@@ -211,9 +211,9 @@ describe('ComfyUIAdapter', () => {
       expect(res.promptId).toBe('prompt-video-uuid-2002');
 
       const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-      expect(body.prompt['9'].inputs.filename_prefix).toBe('org-test-123/job-vid-789');
-      expect(body.prompt['7'].inputs.steps).toBe(4);
-      expect(body.prompt['2'].inputs.lora_name).toContain('wan2.2_t2v_lightx2v_4steps_lora');
+      expect(body.prompt['14'].inputs.filename_prefix).toBe('org-test-123/job-vid-789');
+      expect(body.prompt['10'].inputs.steps).toBe(4);
+      expect(body.prompt['1L'].inputs.lora_name).toContain('wan2.2_t2v_lightx2v_4steps_lora');
     });
 
     it('submits quality video prompt successfully using 20 steps and no LoRA', async () => {
@@ -235,7 +235,8 @@ describe('ComfyUIAdapter', () => {
       expect(res.promptId).toBe('prompt-video-uuid-2002');
 
       const body = JSON.parse(fetchMock.mock.calls[0][1].body as string);
-      expect(body.prompt['6'].inputs.steps).toBe(20);
+      expect(body.prompt['10'].inputs.steps).toBe(20);
+      expect(body.prompt['11'].inputs.steps).toBe(20);
       expect(body.prompt['2'].class_type).toBe('CLIPLoader'); // No LoraLoaderModelOnly in quality lane
     });
   });
