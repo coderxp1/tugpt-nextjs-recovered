@@ -75,9 +75,7 @@ async function createOrgUser(
   if (userError || !userData.user) throw new Error(`createUser failed: ${userError?.message}`);
   const userId = userData.user.id;
 
-  // profiles row mirrors auth.users (FK from organization_members).
-  const { error: profileError } = await admin.from('profiles').upsert({ id: userId });
-  if (profileError) throw new Error(`profiles upsert failed: ${profileError.message}`);
+  // profiles row is automatically populated by on_auth_user_created trigger.
 
   const { data: orgData, error: orgError } = await admin
     .from('organizations')
