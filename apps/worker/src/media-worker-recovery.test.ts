@@ -26,6 +26,7 @@ function makeJobRow(overrides: Record<string, unknown> = {}) {
     prompt_id: MOCK_PROMPT_ID,
     attempts: 1,
     result_path: null,
+    pgmq_msg_id: 42,
     ...overrides,
   };
 }
@@ -153,8 +154,9 @@ describe('media-worker recovery (M2)', () => {
     const archiveCalls = client.rpcCalls.filter((c) => c.name === 'archive_media_failed_job');
     expect(archiveCalls).toHaveLength(1);
     expect(archiveCalls[0].args).toMatchObject({
-      p_job_id: MOCK_JOB_ID,
-      p_error_code: 'MEDIA_EXECUTION_ERROR',
+      p_msg_id: '42',
+      p_media_job_id: MOCK_JOB_ID,
+      p_error_code: 'MEDIA_INTERNAL_ERROR',
     });
   });
 
@@ -191,8 +193,9 @@ describe('media-worker recovery (M2)', () => {
     const archiveCalls = client.rpcCalls.filter((c) => c.name === 'archive_media_failed_job');
     expect(archiveCalls).toHaveLength(1);
     expect(archiveCalls[0].args).toMatchObject({
-      p_job_id: MOCK_JOB_ID,
-      p_error_code: 'MEDIA_PROMPT_LOST',
+      p_msg_id: '42',
+      p_media_job_id: MOCK_JOB_ID,
+      p_error_code: 'MEDIA_PROVIDER_ERROR',
     });
   });
 

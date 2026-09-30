@@ -29,6 +29,37 @@ interface MediaJobRow {
   prompt_id: string | null;
   attempts: number;
   result_path: string | null;
+  /** Present on recovery scans; the live path carries the msg id separately. */
+  pgmq_msg_id?: string | number | null;
+}
+
+/**
+ * Error-code allowlist of `archive_media_failed_job` (20260927000001,
+ * ADR-019 D6). The worker's internal codes are mapped onto it at the
+ * archive boundary; the specific reason is preserved in
+ * `p_provider_error_detail`. Unknown codes fail closed to
+ * MEDIA_INTERNAL_ERROR rather than tripping INVALID_MEDIA_FAILURE_CODE.
+ */
+const ARCHIVE_CODE_ALLOWLIST = new Set([
+  'MEDIA_EXHAUSTED_RETRIES',
+  'MEDIA_PROVIDER_ERROR',
+  'MEDIA_TIMEOUT',
+  'MEDIA_INTERNAL_ERROR',
+  'MEDIA_MODEL_UNAVAILABLE',
+  'MEDIA_STORAGE_ERROR',
+]);
+
+function mapToArchiveCode(code: string): string {
+  if (ARCHIVE_CODE_ALLOWLIST.has(code)) return code;
+  switch (code) {
+    case 'MEDIA_INTERRUPTED':
+    case 'MEDIA_HISTORY_LOST':
+    case 'MEDIA_ABORTED':
+    case 'MEDIA_PROMPT_LOST':
+      return 'MEDIA_PROVIDER_ERROR';
+    default:
+      return 'MEDIA_INTERNAL_ERROR';
+  }
 }
 
 export class MediaWorker {
@@ -222,7 +253,12 @@ export class MediaWorker {
         await this.archiveFailed(mediaJobId, msgId, result.errorCode || 'MEDIA_EXECUTION_ERROR', result.errorDetail || 'ComfyUI render failed');
       }
     } catch (err: unknown) {
-      await this.archiveFailed(mediaJobId, msgId, 'MEDIA_EXECUTION_ERROR', (err as Error).message);
+      const message = (err as Error).message;
+      // Storage has its own allowlisted code; everything else is internal.
+      const code = message.startsWith('Storage upload failed')
+        ? 'MEDIA_STORAGE_ERROR'
+        : 'MEDIA_EXECUTION_ERROR';
+      await this.archiveFailed(mediaJobId, msgId, code, message);
     }
   }
 
@@ -277,7 +313,7 @@ export class MediaWorker {
     try {
       const { data, error } = await this.client
         .from('media_generation_jobs')
-        .select('id, organization_id, kind, status, prompt, params, prompt_id, attempts, result_path')
+        .select('id, organization_id, kind, status, prompt, params, prompt_id, attempts, result_path, pgmq_msg_id')
         .eq('status', 'processing')
         .not('prompt_id', 'is', null);
       if (error) throw new Error(error.message);
@@ -322,9 +358,10 @@ export class MediaWorker {
         if (peek.found && peek.status === 'error') {
           console.log(JSON.stringify({ ...logBase, status: 'recovery-error' }));
           await this.client.rpc('archive_media_failed_job', {
-            p_job_id: jobRow.id,
-            p_error_code: 'MEDIA_EXECUTION_ERROR',
-            p_error_detail: (peek.errorDetail || 'ComfyUI execution error').slice(0, 512),
+            p_msg_id: String(jobRow.pgmq_msg_id),
+            p_media_job_id: jobRow.id,
+            p_error_code: mapToArchiveCode('MEDIA_EXECUTION_ERROR'),
+            p_provider_error_detail: (peek.errorDetail || 'ComfyUI execution error').slice(0, 512),
           });
           continue;
         }
@@ -346,9 +383,10 @@ export class MediaWorker {
         // resubmit work the render farm cannot account for.
         console.error(JSON.stringify({ ...logBase, status: 'recovery-lost' }));
         await this.client.rpc('archive_media_failed_job', {
-          p_job_id: jobRow.id,
-          p_error_code: 'MEDIA_PROMPT_LOST',
-          p_error_detail: 'ComfyUI has no record of prompt_id after worker restart; not resubmitted',
+          p_msg_id: String(jobRow.pgmq_msg_id),
+          p_media_job_id: jobRow.id,
+          p_error_code: mapToArchiveCode('MEDIA_PROMPT_LOST'),
+          p_provider_error_detail: 'ComfyUI has no record of prompt_id after worker restart; not resubmitted',
         });
       } catch (err: unknown) {
         console.error(JSON.stringify({
@@ -405,11 +443,22 @@ export class MediaWorker {
   ): Promise<void> {
     try {
       if (jobId) {
-        await this.client.rpc('archive_media_failed_job', {
-          p_job_id: jobId,
-          p_error_code: errorCode,
-          p_error_detail: errorDetail,
+        const { error } = await this.client.rpc('archive_media_failed_job', {
+          p_msg_id: msgId.toString(),
+          p_media_job_id: jobId,
+          p_error_code: mapToArchiveCode(errorCode),
+          p_provider_error_detail: errorDetail,
         });
+        if (error) {
+          // Never swallow silently: an un-archived failure leaves the job
+          // stuck in a non-terminal state with no queue message.
+          console.error(JSON.stringify({
+            service: 'media-worker',
+            errorCode: 'ARCHIVE_RPC_ERROR',
+            jobId,
+            message: error.message,
+          }));
+        }
       }
       await this.queue.deleteJob(msgId);
     } catch {
