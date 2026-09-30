@@ -1,0 +1,177 @@
+{
+ "UNETLoader": {
+  "input": {
+   "required": {
+    "unet_name": [
+     [
+      "wan2.2_t2v_high_noise_14B_fp16.safetensors",
+      "wan2.2_t2v_low_noise_14B_fp16.safetensors",
+      "wan2.2_i2v_high_noise_14B_fp16.safetensors",
+      "wan2.2_i2v_low_noise_14B_fp16.safetensors",
+      "wan2.2_ti2v_5B_fp16.safetensors"
+     ]
+    ],
+    "weight_dtype": [
+     [
+      "default",
+      "fp8_e4m3fn",
+      "fp8_e5m2",
+      "fp16",
+      "bf16"
+     ]
+    ]
+   }
+  },
+  "output": [
+   "MODEL"
+  ],
+  "name": "UNETLoader"
+ },
+ "CheckpointLoaderSimple": {
+  "input": {
+   "required": {
+    "ckpt_name": [
+     [
+      "flux1-schnell-fp8.safetensors",
+      "flux1-dev-fp8.safetensors"
+     ]
+    ]
+   }
+  },
+  "output": [
+   "MODEL",
+   "CLIP",
+   "VAE"
+  ],
+  "name": "CheckpointLoaderSimple"
+ },
+ "CLIPLoader": {
+  "input": {
+   "required": {
+    "clip_name": [
+     [
+      "umt5_xxl_fp16.safetensors"
+     ]
+    ],
+    "type": [
+     [
+      "wan",
+      "flux",
+      "sdxl"
+     ]
+    ]
+   }
+  },
+  "output": [
+   "CLIP"
+  ],
+  "name": "CLIPLoader"
+ },
+ "VAELoader": {
+  "input": {
+   "required": {
+    "vae_name": [
+     [
+      "wan_2.1_vae.safetensors",
+      "wan2.2_vae.safetensors"
+     ]
+    ]
+   }
+  },
+  "output": [
+   "VAE"
+  ],
+  "name": "VAELoader"
+ },
+ "LoraLoaderModelOnly": {
+  "input": {
+   "required": {
+    "model": [
+     "MODEL"
+    ],
+    "lora_name": [
+     [
+      "wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors",
+      "wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors",
+      "wan2.2_i2v_lightx2v_4steps_lora_v1_high_noise.safetensors",
+      "wan2.2_i2v_lightx2v_4steps_lora_v1_low_noise.safetensors"
+     ]
+    ],
+    "strength_model": [
+     "FLOAT",
+     {
+      "default": 1.0,
+      "min": -100.0,
+      "max": 100.0,
+      "step": 0.01
+     }
+    ]
+   }
+  },
+  "output": [
+   "MODEL"
+  ],
+  "name": "LoraLoaderModelOnly"
+ },
+ "CLIPTextEncode": {
+  "input": {
+   "required": {}
+  },
+  "output": [
+   "CONDITIONING"
+  ],
+  "name": "CLIPTextEncode"
+ },
+ "VAEDecode": {
+  "input": {
+   "required": {}
+  },
+  "output": [
+   "IMAGE"
+  ],
+  "name": "VAEDecode"
+ },
+ "ModelSamplingSD3": {
+  "input": {
+   "required": {}
+  },
+  "output": [
+   "MODEL"
+  ],
+  "name": "ModelSamplingSD3"
+ },
+ "EmptyHunyuanLatentVideo": {
+  "input": {
+   "required": {}
+  },
+  "output": [
+   "LATENT"
+  ],
+  "name": "EmptyHunyuanLatentVideo"
+ },
+ "KSamplerAdvanced": {
+  "input": {
+   "required": {}
+  },
+  "output": [
+   "LATENT"
+  ],
+  "name": "KSamplerAdvanced"
+ },
+ "CreateVideo": {
+  "input": {
+   "required": {}
+  },
+  "output": [
+   "VIDEO"
+  ],
+  "name": "CreateVideo"
+ },
+ "SaveVideo": {
+  "input": {
+   "required": {}
+  },
+  "output": [],
+  "name": "SaveVideo"
+ }
+}
