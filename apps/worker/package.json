@@ -9,6 +9,7 @@
     "dev:transcription": "tsx src/transcription-index.ts",
     "dev:media": "tsx src/media-index.ts",
     "e2e:milestone1": "tsx src/e2e/milestone1.ts",
+    "e2e:media": "tsx src/e2e/media-e2e.ts",
     "secrets": "node dist/secrets-cli.js",
     "start": "node dist/index.js",
     "start:draft": "node dist/draft-index.js",
