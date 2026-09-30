@@ -108,6 +108,12 @@ async function main(): Promise<void> {
     auth: { autoRefreshToken: false, persistSession: false },
   });
 
+  // Enable global media_generation feature flag required by is_feature_enabled RPC
+  await admin.from('feature_flags').upsert(
+    { organization_id: null, key: 'media_generation', is_enabled: true },
+    { onConflict: 'key' }
+  );
+
   // --- Setup: two organizations -----------------------------------------
   console.log('setup: creating org A and org B');
   const orgA = await createOrgUser(admin, `e2e-a-${Date.now()}@example.com`);
