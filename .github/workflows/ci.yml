@@ -220,8 +220,8 @@ jobs:
         with:
           version: 2.115.0
 
-      - name: Start local Postgres and apply migrations
-        run: supabase db start
+      - name: Start local Supabase stack and apply migrations
+        run: supabase start
 
       - name: Run media E2E harness
         run: |
