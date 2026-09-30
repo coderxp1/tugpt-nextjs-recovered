@@ -1,0 +1,88 @@
+# docker-compose.media-worker.yml
+#
+# GPU-host deployment for the TuGPT media generation worker.
+# ADR-019 D10: unprivileged media worker beside ComfyUI.
+#
+# THIS FILE IS A PROPOSAL FOR REVIEW. It is NOT part of the app-host
+# compose stack (docker-compose.yml) and must not be merged into it.
+# Creating or attaching the `tugpt_media_net` network on the GPU host
+# is a server change and needs separate administrator approval before
+# anything here is applied. The running GPU-host stack is not touched
+# without approval.
+#
+# Security posture (all deliberate):
+# - No `ports:` — the worker is portless; it only makes outbound calls
+#   to ComfyUI (http://comfyui:8188) and Supabase.
+# - No GPU device reservation — the worker never touches the GPU;
+#   only ComfyUI does.
+# - No Docker socket mount — the worker cannot manage containers.
+# - `user: "65532:65532"` — runs as unprivileged nobody, not root.
+# - `read_only: true` with a tmpfs for /tmp — minimal writable surface.
+# - `cap_drop: [ALL]` — no Linux capabilities.
+# - `security_opt: [no-new-privileges:true]` — no privilege escalation.
+#
+# Secrets are NOT in this file. The container loads them at start via
+# `env_file` from /etc/tugpt/media-worker.env on the GPU host
+# (root-owned, 0600), containing:
+#   NEXT_PUBLIC_SUPABASE_URL=...
+#   SUPABASE_SERVICE_ROLE_KEY=...
+#   COMFYUI_BASE_URL=http://comfyui:8188
+#   MEDIA_WORKER_POLL_INTERVAL_MS=5000
+#   MEDIA_WORKER_VISIBILITY_TIMEOUT_SECONDS=600
+#
+# Build and run (after approval):
+#   docker compose -f docker-compose.media-worker.yml build
+#   docker compose -f docker-compose.media-worker.yml up -d
+#
+# The worker's boot check (media-index.ts) verifies ComfyUI reachability
+# and the /object_info node/model allowlist before polling, and exits
+# non-zero (fail closed) if the render backend is misconfigured.
+
+name: tugpt-media
+
+services:
+  media-worker:
+    build:
+      context: ../..
+      dockerfile: deploy/gpu-host/Dockerfile.media-worker
+    image: tugpt-media-worker:local
+    container_name: tugpt-media-worker
+    restart: unless-stopped
+    # Unprivileged: run as nobody, drop all capabilities, no new privileges.
+    user: "65532:65532"
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    read_only: true
+    tmpfs:
+      - /tmp:uid=65532,gid=65532,mode=1777
+    # Portless: no published ports.
+    # GPU-less: no device reservation; no Docker socket.
+    networks:
+      - tugpt_media_net
+    env_file:
+      - /etc/tugpt/media-worker.env
+    environment:
+      COMFYUI_BASE_URL: http://comfyui:8188
+    healthcheck:
+      # The worker is portless; liveness is "process still running".
+      # Docker restarts it on non-zero exit via `restart: unless-stopped`.
+      test: ["CMD-SHELL", "node -e \"process.exit(0)\""]
+      interval: 60s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+networks:
+  # PROPOSAL ONLY. This network must already exist on the GPU host with the
+  # ComfyUI container attached (administrator action, separate approval).
+  # `external: true` asserts that; compose will not create it.
+  tugpt_media_net:
+    name: tugpt_media_net
+    external: true

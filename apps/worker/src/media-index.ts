@@ -33,6 +33,27 @@ async function main(): Promise<void> {
 
   const adapterFactory = () => new ComfyUIAdapter();
 
+  // Boot check: fail closed. ComfyUI must be reachable and the required
+  // nodes/models must be present in /object_info before the worker starts
+  // polling. A bad render backend must never silently accept jobs.
+  const bootAdapter = adapterFactory();
+  try {
+    await bootAdapter.validateObjectInfo();
+    console.log(JSON.stringify({
+      service: 'media-worker',
+      status: 'boot-check-passed',
+      comfyUrl: process.env.COMFYUI_BASE_URL || 'http://comfyui:8188',
+    }));
+  } catch (err: unknown) {
+    console.error(JSON.stringify({
+      service: 'media-worker',
+      status: 'boot-check-failed',
+      errorCode: (err as { code?: string }).code || 'INVALID_CONFIGURATION',
+      message: (err as Error).message,
+    }));
+    process.exit(1);
+  }
+
   const worker = new MediaWorker(client, adapterFactory, {
     pollIntervalMs: POLL_INTERVAL_MS,
     visibilityTimeoutSeconds: VISIBILITY_TIMEOUT_SECONDS,

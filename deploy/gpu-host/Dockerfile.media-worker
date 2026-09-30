@@ -1,0 +1,43 @@
+# Dockerfile.media-worker
+#
+# Builds the TuGPT media generation worker image for the GPU host.
+# The worker is a plain Node.js process: no GPU access, no ports,
+# no Docker socket. It talks to ComfyUI over HTTP and to Supabase
+# over HTTPS.
+#
+# Build from the repo root:
+#   docker build -f deploy/gpu-host/Dockerfile.media-worker -t tugpt-media-worker:local .
+
+FROM node:20-slim AS builder
+
+WORKDIR /build
+
+# Install pnpm (matches the repo's package manager).
+RUN corepack enable && corepack prepare pnpm@10.34.5 --activate
+
+# Copy workspace manifests first for layer caching.
+COPY pnpm-workspace.yaml pnpm-lock.yaml package.json ./
+COPY packages ./packages
+COPY apps/worker ./apps/worker
+
+RUN pnpm install --frozen-lockfile --filter @tugpt/worker...
+RUN pnpm --filter @tugpt/worker build
+
+# --- Runtime stage: minimal, non-root ---------------------------------
+FROM node:20-slim AS runtime
+
+# Create the unprivileged user the compose file runs as (65532:65532).
+RUN groupadd -r -g 65532 worker && useradd -r -u 65532 -g worker worker
+
+WORKDIR /app
+
+COPY --from=builder /build/apps/worker/dist ./dist
+COPY --from=builder /build/apps/worker/package.json ./package.json
+COPY --from=builder /build/node_modules ./node_modules
+
+# Drop root before the entrypoint runs (compose also sets user:).
+USER 65532:65532
+
+# Boot check runs inside the entrypoint: ComfyUI reachability +
+# /object_info allowlist verification, fail closed.
+ENTRYPOINT ["node", "dist/media-index.js"]
