@@ -225,9 +225,9 @@ jobs:
 
       - name: Run media E2E harness
         run: |
-          eval $(supabase status -o env)
-          export SUPABASE_URL="${SUPABASE_URL:-$API_URL}"
-          export SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-$ANON_KEY}"
-          export SUPABASE_SERVICE_ROLE_KEY="${SERVICE_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-$SERVICE_ROLE_KEY}}"
+          STATUS_JSON=$(supabase status -o json)
+          export SUPABASE_URL=$(node -e 'console.log(JSON.parse(process.argv[1]).API_URL)' "$STATUS_JSON")
+          export SUPABASE_ANON_KEY=$(node -e 'console.log(JSON.parse(process.argv[1]).ANON_KEY)' "$STATUS_JSON")
+          export SUPABASE_SERVICE_ROLE_KEY=$(node -e 'let d=JSON.parse(process.argv[1]); console.log(d.SERVICE_ROLE_KEY || d.SERVICE_KEY)' "$STATUS_JSON")
           pnpm --filter @tugpt/worker e2e:media
 
