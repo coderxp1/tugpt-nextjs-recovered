@@ -2,7 +2,7 @@
 
 **Status:** active
 **Gate:** CI job `database-tests` in `.github/workflows/ci.yml`
-**Files:** <!-- database-tests-count:start -->`supabase/tests/database/*.sql` — 36 files<!-- database-tests-count:end -->, ~800 pgTAP assertions
+**Files:** <!-- database-tests-count:start -->`supabase/tests/database/*.sql` — 37 files<!-- database-tests-count:end -->, ~800 pgTAP assertions
 
 ## Why this document exists
 
@@ -44,6 +44,30 @@ supabase test db --local supabase/tests/database/rls_adversarial.test.sql
 `supabase db reset` re-applies every migration from scratch against the running
 container — use it after adding a migration rather than restarting.
 
+### Race tests (run separately)
+
+`supabase/race-tests/` holds the genuine two-session concurrency races.
+They are NOT scanned by `supabase test db --local`: the race needs a
+dblink self-connection, which PostgreSQL only grants to a superuser, and
+pg_prove fails the whole run when any scanned file executes zero tests —
+so a no-op or skip inside the suite tree is not an option. They run only
+via the CI `database-tests` job's dedicated race step, as `supabase_admin`:
+
+```bash
+supabase test db \
+  --db-url "postgresql://supabase_admin:postgres@127.0.0.1:56322/postgres" \
+  supabase/race-tests/media_concurrency_race.test.sql
+```
+
+The file fails closed if run as a non-superuser or if the self-connection
+is unavailable — there is no skip path. Current races:
+
+- `media_concurrency_race.test.sql` — D3: two sessions hold uncommitted
+  enqueues on the same org at the same time; the partial unique index
+  admits exactly one winner (D3a loser gets P3M09, D3b exactly one
+  survivor, D3c survivor is the first committer, D3d loser's row never
+  materializes).
+
 ## What the suite covers
 
 | File | Guards |
@@ -75,6 +99,7 @@ container — use it after adding a migration rather than restarting.
 | `fx_conversion.test.sql` | EUR→USD accounting at the ECB reference rate — that the rate in force is the latest one at or before an event's instant (never reached backwards for), that identity needs no row, that the rate and its date are stored per row so a later rate cannot re-price recorded history, that an event already in the accounting currency stores no rate at all, and that a stale rate warns rather than blocking |
 | `transcript_ingest.test.sql` | the path a voice note takes to a draft — that a body can never exist without a `body_source` saying whether a person or a machine produced it (and never a source without a body), that each of the five conditions gating a billable transcription is independently load-bearing against a positive control run on the same fixture, that one message can hold only one transcription job, that completing one writes the transcript, closes the job and enqueues the draft in a single call, that an empty transcript still completes and still bills but writes no body and enqueues nothing, and that a failed or dead-lettered job never puts provider diagnostics in front of a reviewer |
 | `transcription_worker_rpcs.test.sql` | the five queue verbs the transcription worker runs on — that a job already carrying a provider job reference is never re-submitted, that the fourth delivery dead-letters without a fourth billable call and records three attempts rather than four, that a completed job's stale queue message is deleted while a dead letter is archived (a success must not appear beside the failures an operator reads), that every terminal code the worker can produce is accepted by both the archive RPC and the `failed_jobs` CHECK — asserted one code at a time, because a set comparison passes while one is missing from one of the two lists — that a job no worker ever claimed cannot be dead-lettered with an invented attempt count, that a recorded provider job reference is never overwritten by a different one, and that `fail_transcription_job` is deliberately absent from the public schema |
+| `media_worker_rpcs.test.sql` | the media worker's queue verbs — that enqueue validates kind/prompt/params before any side effect (P3M12), that the caller must belong to the named organization (P3M13) and the `media_generation` flag must be on globally and per-org (P3M10), that idempotent resubmits return the existing job while a reused key with different prompt/kind/params is refused (P3M14), that a second active job for the org is rejected with P3M09 in the serialized pin (the genuine two-session race lives in supabase/race-tests (not scanned by the regular run)), that `prompt_id` is recorded before polling and never overwritten, that cancelling removes the queued message and records a reason, that completing enforces the exact `<org_id>/<job_id>.<png\|mp4>` result path with the extension matching the kind (P3M15), that the `media` storage bucket exists and is explicitly private (`public = false`, asserted not assumed from the default), and that `anon`/`authenticated` hold no EXECUTE on any of the worker RPCs |
 
 ## Writing a test
 
