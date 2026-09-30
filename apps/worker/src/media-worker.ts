@@ -246,18 +246,18 @@ export class MediaWorker {
         // Delete from PGMQ queue
         await this.queue.deleteJob(msgId);
       } else if (result.status === 'cancelled') {
-        await this.archiveFailed(mediaJobId, msgId, 'MEDIA_INTERRUPTED', result.errorDetail || 'Job interrupted');
+        await this.archiveFailed(mediaJobId, msgId, 'MEDIA_INTERNAL_ERROR', result.errorDetail || 'Job interrupted');
       } else if (result.status === 'timed_out') {
         await this.archiveFailed(mediaJobId, msgId, 'MEDIA_TIMEOUT', result.errorDetail || 'Job timed out');
       } else {
-        await this.archiveFailed(mediaJobId, msgId, result.errorCode || 'MEDIA_EXECUTION_ERROR', result.errorDetail || 'ComfyUI render failed');
+        const code = result.errorCode === 'MEDIA_EXECUTION_ERROR' ? 'MEDIA_PROVIDER_ERROR' : (result.errorCode || 'MEDIA_PROVIDER_ERROR');
+        await this.archiveFailed(mediaJobId, msgId, code, result.errorDetail || 'ComfyUI render failed');
       }
     } catch (err: unknown) {
-      const message = (err as Error).message;
-      // Storage has its own allowlisted code; everything else is internal.
-      const code = message.startsWith('Storage upload failed')
+      const message = (err as Error).message || '';
+      const code = message.includes('Storage upload failed') || message.startsWith('MEDIA_STORAGE_ERROR')
         ? 'MEDIA_STORAGE_ERROR'
-        : 'MEDIA_EXECUTION_ERROR';
+        : 'MEDIA_INTERNAL_ERROR';
       await this.archiveFailed(mediaJobId, msgId, code, message);
     }
   }

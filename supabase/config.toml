@@ -30,7 +30,7 @@ enabled = false
 port = 56327
 
 [storage]
-enabled = false
+enabled = true
 file_size_limit = "50MiB"
 
 
