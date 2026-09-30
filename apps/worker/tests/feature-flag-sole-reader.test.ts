@@ -62,6 +62,13 @@ const ALLOWED_TS = new Map<string, string>([
       'answer rather than inferring it from the rows it just wrote — which is the ' +
       'behaviour this guard exists to require.',
   ],
+  [
+    'apps/worker/src/e2e/media-e2e.ts',
+    'E2E harness. Enables the media_generation flag for two throwaway test orgs ' +
+      'as setup (torn down afterwards). It never reads the flag to authorize: ' +
+      'submission goes through submit_media_job, which calls is_feature_enabled ' +
+      'itself, and retrieval is gated by the org-scoped job read.',
+  ],
 ]);
 
 /**
