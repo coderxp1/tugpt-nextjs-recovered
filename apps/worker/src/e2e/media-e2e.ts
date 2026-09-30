@@ -77,20 +77,14 @@ async function createOrgUser(
 
   // profiles row is automatically populated by on_auth_user_created trigger.
 
-  const { data: orgData, error: orgError } = await admin
-    .from('organizations')
-    .insert({ name: `e2e-${email}`, slug: `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}` })
-    .select('id')
-    .single();
-  if (orgError || !orgData) throw new Error(`organization insert failed: ${orgError?.message}`);
-  const orgId = (orgData as { id: string }).id;
-
-  const { error: memberError } = await admin.from('organization_members').insert({
-    organization_id: orgId,
-    user_id: userId,
-    role: 'owner',
+  const slug = `e2e-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const { data: orgIdData, error: orgError } = await admin.rpc('create_organization_with_owner', {
+    p_name: `e2e-${email}`,
+    p_slug: slug,
+    p_owner_id: userId,
   });
-  if (memberError) throw new Error(`organization_members insert failed: ${memberError.message}`);
+  if (orgError || !orgIdData) throw new Error(`create_organization_with_owner failed: ${orgError?.message}`);
+  const orgId = orgIdData as string;
 
   // Enable the media_generation feature flag for this org.
   const { error: flagError } = await admin.from('feature_flags').upsert(
