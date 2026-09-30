@@ -109,10 +109,26 @@ async function main(): Promise<void> {
   });
 
   // Enable global media_generation feature flag required by is_feature_enabled RPC
-  await admin.from('feature_flags').upsert(
-    { organization_id: null, key: 'media_generation', is_enabled: true },
-    { onConflict: 'key' }
-  );
+  const { data: globalFlag } = await admin
+    .from('feature_flags')
+    .select('id')
+    .is('organization_id', null)
+    .eq('key', 'media_generation')
+    .maybeSingle();
+
+  if (!globalFlag) {
+    const { error: insErr } = await admin
+      .from('feature_flags')
+      .insert({ organization_id: null, key: 'media_generation', is_enabled: true });
+    if (insErr) throw new Error(`Global feature flag insert failed: ${insErr.message}`);
+  } else {
+    const { error: updErr } = await admin
+      .from('feature_flags')
+      .update({ is_enabled: true })
+      .is('organization_id', null)
+      .eq('key', 'media_generation');
+    if (updErr) throw new Error(`Global feature flag update failed: ${updErr.message}`);
+  }
 
   // --- Setup: two organizations -----------------------------------------
   console.log('setup: creating org A and org B');
