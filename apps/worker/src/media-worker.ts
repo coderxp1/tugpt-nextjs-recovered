@@ -11,7 +11,7 @@
  */
 
 import { MediaQueueAdapter, MediaQueueMessage } from './media-queue-adapter.js';
-import { ComfyUIAdapter, MediaGenerationRequest } from '@tugpt/ai-providers';
+import { ComfyUIAdapter, MediaGenerationRequest, MediaOutputInfo } from '@tugpt/ai-providers';
 
 export interface MediaWorkerOptions {
   readonly pollIntervalMs?: number;
@@ -206,33 +206,11 @@ export class MediaWorker {
 
       // 2. Poll ComfyUI /history for completion, extending the queue lease
       // while the render is in flight so no second worker claims it.
-      const result = await this.pollWithLease(adapter, promptId, msgId, signal);
+      // promptId is non-null here: either it came from the row or we just submitted.
+      const result = await this.pollWithLease(adapter, promptId as string, msgId, signal);
 
       if (result.status === 'completed' && result.output) {
-        // Fetch output file bytes
-        const fileBytes = await adapter.fetchOutputBytes(result.output, signal);
-
-        // Upload to Supabase Storage under media bucket at <org_id>/<job_id>.<ext>
-        const ext = kind === 'video' ? 'mp4' : 'png';
-        const storagePath = `${organizationId}/${mediaJobId}.${ext}`;
-
-        const { error: uploadError } = await this.client.storage
-          .from('media')
-          .upload(storagePath, fileBytes, {
-            contentType: kind === 'video' ? 'video/mp4' : 'image/png',
-            upsert: true,
-          });
-
-        if (uploadError) {
-          throw new Error(`Storage upload failed: ${uploadError.message}`);
-        }
-
-        // Complete job in DB
-        await this.client.rpc('complete_media_job', {
-          p_job_id: mediaJobId,
-          p_result_path: storagePath,
-          p_gpu_seconds: Math.ceil(result.latencyMs / 1000),
-        });
+        await this.completeRender(jobRow, result.output, signal, Math.ceil(result.latencyMs / 1000));
 
         // Delete from PGMQ queue
         await this.queue.deleteJob(msgId);
@@ -284,16 +262,139 @@ export class MediaWorker {
    *
    * Any job row in `processing` with a stored `prompt_id` is a render that
    * may still be alive in ComfyUI from before the restart. Reconcile each
-   * against /history BEFORE polling for new work: completed results are
-   * collected, still-running prompts are adopted, and only genuinely lost
-   * work is re-queued. Never silently resubmit.
-   *
-   * Implemented in M2; the hook is wired here so the ordering guarantee
-   * (recover before poll) is structural.
+   * against /history and /queue BEFORE polling for new work:
+   * - completed in history  -> collect the result (fetch, upload, complete)
+   * - error in history      -> archive as failed (visible, auditable)
+   * - still pending/running -> leave it; the redelivered queue message is
+   *                            adopted by processJob's prompt_id check
+   * - absent from both      -> archive as MEDIA_PROMPT_LOST. This is the
+   *                            "never silently resubmit" rule: a prompt
+   *                            ComfyUI has no record of is failed loudly,
+   *                            not re-rendered as if nothing happened.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   protected async recoverInterruptedJobs(signal: AbortSignal): Promise<void> {
-    // M2 implements this.
+    let rows: MediaJobRow[] | null;
+    try {
+      const { data, error } = await this.client
+        .from('media_generation_jobs')
+        .select('id, organization_id, kind, status, prompt, params, prompt_id, attempts, result_path')
+        .eq('status', 'processing')
+        .not('prompt_id', 'is', null);
+      if (error) throw new Error(error.message);
+      rows = data as MediaJobRow[];
+    } catch (err: unknown) {
+      console.error(JSON.stringify({
+        service: 'media-worker',
+        errorCode: 'RECOVERY_LIST_ERROR',
+        message: (err as Error).message,
+      }));
+      return;
+    }
+
+    if (!rows || rows.length === 0) {
+      console.log(JSON.stringify({ service: 'media-worker', status: 'recovery-clean' }));
+      return;
+    }
+
+    console.log(JSON.stringify({
+      service: 'media-worker',
+      status: 'recovery-start',
+      interruptedJobs: rows.length,
+    }));
+
+    const adapter = this.adapterFactory();
+
+    for (const jobRow of rows) {
+      if (signal.aborted) break;
+      const promptId = jobRow.prompt_id as string;
+      const logBase = { service: 'media-worker', jobId: jobRow.id, promptId };
+
+      try {
+        const peek = await adapter.peekHistory(promptId, signal);
+
+        if (peek.found && peek.status === 'completed' && peek.output) {
+          console.log(JSON.stringify({ ...logBase, status: 'recovery-completed' }));
+          // Recovery has no measured latency; the render predates this worker.
+          await this.completeRender(jobRow, peek.output, signal, 0);
+          continue;
+        }
+
+        if (peek.found && peek.status === 'error') {
+          console.log(JSON.stringify({ ...logBase, status: 'recovery-error' }));
+          await this.client.rpc('archive_media_failed_job', {
+            p_job_id: jobRow.id,
+            p_error_code: 'MEDIA_EXECUTION_ERROR',
+            p_error_detail: (peek.errorDetail || 'ComfyUI execution error').slice(0, 512),
+          });
+          continue;
+        }
+
+        if (peek.found && peek.status === 'pending') {
+          // Finalizing in history; the redelivered queue message adopts it.
+          console.log(JSON.stringify({ ...logBase, status: 'recovery-pending-adopt' }));
+          continue;
+        }
+
+        // Not in history: confirm it is not still queued/running in ComfyUI.
+        const qState = await adapter.checkQueue(promptId, signal);
+        if (qState.isPending || qState.isRunning) {
+          console.log(JSON.stringify({ ...logBase, status: 'recovery-alive-adopt' }));
+          continue;
+        }
+
+        // Genuinely lost: ComfyUI has no record. Fail loudly — never silently
+        // resubmit work the render farm cannot account for.
+        console.error(JSON.stringify({ ...logBase, status: 'recovery-lost' }));
+        await this.client.rpc('archive_media_failed_job', {
+          p_job_id: jobRow.id,
+          p_error_code: 'MEDIA_PROMPT_LOST',
+          p_error_detail: 'ComfyUI has no record of prompt_id after worker restart; not resubmitted',
+        });
+      } catch (err: unknown) {
+        console.error(JSON.stringify({
+          ...logBase,
+          errorCode: 'RECOVERY_JOB_ERROR',
+          message: (err as Error).message,
+        }));
+      }
+    }
+
+    console.log(JSON.stringify({ service: 'media-worker', status: 'recovery-done' }));
+  }
+
+  /**
+   * Shared completion flow: fetch output bytes, upload to the private media
+   * bucket, mark the job complete. Used by both the live path (with measured
+   * GPU seconds) and recovery (0 — the render predates this worker).
+   */
+  private async completeRender(
+    jobRow: MediaJobRow,
+    output: MediaOutputInfo,
+    signal: AbortSignal,
+    gpuSeconds: number
+  ): Promise<void> {
+    const adapter = this.adapterFactory();
+    const fileBytes = await adapter.fetchOutputBytes(output, signal);
+
+    const ext = jobRow.kind === 'video' ? 'mp4' : 'png';
+    const storagePath = `${jobRow.organization_id}/${jobRow.id}.${ext}`;
+
+    const { error: uploadError } = await this.client.storage
+      .from('media')
+      .upload(storagePath, fileBytes, {
+        contentType: jobRow.kind === 'video' ? 'video/mp4' : 'image/png',
+        upsert: true,
+      });
+
+    if (uploadError) {
+      throw new Error(`Storage upload failed: ${uploadError.message}`);
+    }
+
+    await this.client.rpc('complete_media_job', {
+      p_job_id: jobRow.id,
+      p_result_path: storagePath,
+      p_gpu_seconds: gpuSeconds,
+    });
   }
 
   private async archiveFailed(

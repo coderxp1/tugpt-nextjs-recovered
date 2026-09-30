@@ -156,6 +156,60 @@ export class ComfyUIAdapter {
     }
   }
 
+  /**
+   * One-shot history check for worker restart recovery.
+   *
+   * Unlike pollHistory, this does not wait: it fetches /history/<promptId>
+   * once and reports what ComfyUI knows right now. The worker uses it to
+   * reconcile interrupted jobs before polling for new work — completed
+   * results are collected, still-queued prompts are adopted, and only
+   * genuinely lost prompts are failed visibly (never silently resubmitted).
+   */
+  async peekHistory(
+    promptId: string,
+    signal?: AbortSignal
+  ): Promise<
+    | { readonly found: false }
+    | { readonly found: true; readonly status: 'completed' | 'pending' | 'error'; readonly output?: MediaOutputInfo; readonly errorDetail?: string }
+  > {
+    const res = await this.customFetch(`${this.baseUrl}/history/${promptId}`, { signal });
+    if (!res.ok) return { found: false };
+    const historyMap = (await res.json()) as Record<string, unknown>;
+    const item = historyMap[promptId] as Record<string, unknown> | undefined;
+    if (!item) return { found: false };
+
+    const statusObj = item.status as { status_str?: string; completed?: boolean; messages?: Array<[string, unknown]> } | undefined;
+    const statusStr = statusObj?.status_str;
+
+    if (statusStr === 'success' || statusObj?.completed === true) {
+      const outputs = item.outputs as Record<string, { images?: MediaOutputInfo[]; gifs?: MediaOutputInfo[] }> | undefined;
+      let outputInfo: MediaOutputInfo | undefined;
+      if (outputs) {
+        for (const nodeKey of Object.keys(outputs)) {
+          const nodeOut = outputs[nodeKey];
+          const files = nodeOut.images || nodeOut.gifs;
+          if (files && files.length > 0) {
+            outputInfo = files[0];
+            break;
+          }
+        }
+      }
+      return { found: true, status: 'completed', output: outputInfo };
+    }
+
+    if (statusStr === 'error') {
+      const messages = statusObj?.messages || [];
+      const detail = messages
+        .map(([, msg]) => JSON.stringify(msg))
+        .join('; ')
+        .slice(0, 512);
+      return { found: true, status: 'error', errorDetail: detail || 'ComfyUI execution error' };
+    }
+
+    // Present but neither success nor error: still finalizing.
+    return { found: true, status: 'pending' };
+  }
+
 
   /**
    * Build workflow graph JSON for the requested domain & lane.
