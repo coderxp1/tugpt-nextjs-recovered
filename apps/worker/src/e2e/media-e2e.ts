@@ -34,7 +34,7 @@ import { startMockComfyUI } from './mock-comfyui.js';
 
 const SUPABASE_URL = process.env.SUPABASE_URL || process.env.API_URL;
 const ANON_KEY = process.env.SUPABASE_ANON_KEY || process.env.ANON_KEY;
-const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SERVICE_ROLE_KEY;
+const SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY || process.env.SERVICE_KEY || process.env.SERVICE_ROLE_KEY;
 
 let failures = 0;
 

@@ -228,6 +228,6 @@ jobs:
           eval $(supabase status -o env)
           export SUPABASE_URL="${SUPABASE_URL:-$API_URL}"
           export SUPABASE_ANON_KEY="${SUPABASE_ANON_KEY:-$ANON_KEY}"
-          export SUPABASE_SERVICE_ROLE_KEY="${SUPABASE_SERVICE_ROLE_KEY:-$SERVICE_ROLE_KEY}"
+          export SUPABASE_SERVICE_ROLE_KEY="${SERVICE_KEY:-${SUPABASE_SERVICE_ROLE_KEY:-$SERVICE_ROLE_KEY}}"
           pnpm --filter @tugpt/worker e2e:media
 
