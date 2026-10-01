@@ -1,0 +1,38 @@
+{
+  "prompt-image-uuid-1001": {
+    "prompt": [
+      0,
+      "prompt-image-uuid-1001",
+      {
+        "9": {
+          "inputs": {
+            "filename_prefix": "11111111-7c11-0000-0000-000000000001/job-img-1001",
+            "images": ["8", 0]
+          },
+          "class_type": "SaveImage"
+        }
+      },
+      {},
+      []
+    ],
+    "outputs": {
+      "9": {
+        "images": [
+          {
+            "filename": "job-img-1001_00001_.png",
+            "subfolder": "11111111-7c11-0000-0000-000000000001",
+            "type": "output"
+          }
+        ]
+      }
+    },
+    "status": {
+      "status_str": "success",
+      "completed": true,
+      "messages": [
+        ["execution_start", {"prompt_id": "prompt-image-uuid-1001"}],
+        ["execution_success", {"prompt_id": "prompt-image-uuid-1001"}]
+      ]
+    }
+  }
+}

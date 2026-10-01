@@ -1,0 +1,18 @@
+{"prompt":{
+  "1":{"class_type":"UNETLoader","inputs":{"unet_name":"wan2.2_t2v_high_noise_14B_fp16.safetensors","weight_dtype":"default"}},
+  "2":{"class_type":"UNETLoader","inputs":{"unet_name":"wan2.2_t2v_low_noise_14B_fp16.safetensors","weight_dtype":"default"}},
+  "1L":{"class_type":"LoraLoaderModelOnly","inputs":{"model":["1",0],"lora_name":"wan2.2_t2v_lightx2v_4steps_lora_v1.1_high_noise.safetensors","strength_model":1.0}},
+  "2L":{"class_type":"LoraLoaderModelOnly","inputs":{"model":["2",0],"lora_name":"wan2.2_t2v_lightx2v_4steps_lora_v1.1_low_noise.safetensors","strength_model":1.0}},
+  "3":{"class_type":"CLIPLoader","inputs":{"clip_name":"umt5_xxl_fp16.safetensors","type":"wan","device":"default"}},
+  "4":{"class_type":"VAELoader","inputs":{"vae_name":"wan_2.1_vae.safetensors"}},
+  "5":{"class_type":"CLIPTextEncode","inputs":{"clip":["3",0],"text":"a golden retriever running along a beach at sunset, waves, cinematic, slow motion"}},
+  "6":{"class_type":"CLIPTextEncode","inputs":{"clip":["3",0],"text":"blurry, distorted, low quality, static, watermark"}},
+  "7":{"class_type":"ModelSamplingSD3","inputs":{"model":["1L",0],"shift":5.0}},
+  "8":{"class_type":"ModelSamplingSD3","inputs":{"model":["2L",0],"shift":5.0}},
+  "9":{"class_type":"EmptyHunyuanLatentVideo","inputs":{"width":1280,"height":720,"length":81,"batch_size":1}},
+  "10":{"class_type":"KSamplerAdvanced","inputs":{"model":["7",0],"add_noise":"enable","noise_seed":42,"steps":4,"cfg":1.0,"sampler_name":"euler","scheduler":"simple","positive":["5",0],"negative":["6",0],"latent_image":["9",0],"start_at_step":0,"end_at_step":2,"return_with_leftover_noise":"enable"}},
+  "11":{"class_type":"KSamplerAdvanced","inputs":{"model":["8",0],"add_noise":"disable","noise_seed":0,"steps":4,"cfg":1.0,"sampler_name":"euler","scheduler":"simple","positive":["5",0],"negative":["6",0],"latent_image":["10",0],"start_at_step":2,"end_at_step":10000,"return_with_leftover_noise":"disable"}},
+  "12":{"class_type":"VAEDecode","inputs":{"samples":["11",0],"vae":["4",0]}},
+  "13":{"class_type":"CreateVideo","inputs":{"images":["12",0],"fps":16}},
+  "14":{"class_type":"SaveVideo","inputs":{"video":["13",0],"filename_prefix":"test_wan22_lightning","format":"mp4","codec":"h264"}}
+}}
