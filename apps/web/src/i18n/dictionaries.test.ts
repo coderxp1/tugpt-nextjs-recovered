@@ -21,6 +21,7 @@ import { es } from './es';
 import { en } from './en';
 import { createTranslator, formatDateTime, getDictionary } from './index';
 import { knownDraftErrorCodes } from '@/lib/draft-api/error-mapper';
+import { knownMediaErrorCodes } from '@/lib/media-api/error-mapper';
 
 const dictionaries: Record<string, Record<string, string>> = { es, en };
 
@@ -70,6 +71,13 @@ describe('dictionary parity', () => {
   it('translates every error code the API can emit', () => {
     for (const code of knownDraftErrorCodes()) {
       expect(Object.keys(es), `no Spanish text for API error ${code}`).toContain(
+        `errors.${code}`
+      );
+    }
+    // The media API has its own mapper; a new P3Mxx must not ship an
+    // English sentence into a Spanish dashboard unnoticed either.
+    for (const code of knownMediaErrorCodes()) {
+      expect(Object.keys(es), `no Spanish text for media API error ${code}`).toContain(
         `errors.${code}`
       );
     }
